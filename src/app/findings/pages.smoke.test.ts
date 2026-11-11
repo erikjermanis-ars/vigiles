@@ -3,6 +3,7 @@
  * in-memory DB (Next's router modules are stubbed). Catches runtime errors in the page trees and
  * checks that the blind Review page never puts the hidden answers into the HTML.
  */
+import { loadVigilesConfig } from '@/lib/config/load';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -48,7 +49,7 @@ vi.mock('next/cache', () => ({ revalidatePath: () => {} }));
 
 const SHA = 'f'.repeat(40);
 const OLD_SHA = 'e'.repeat(40);
-const ACTIVE = 'v1-opus-high-code';
+const ACTIVE = loadVigilesConfig().triage.active_config; // the page reads config/vigiles.yaml
 const profile: ProjectProfile = {
   id: 'web',
   name: 'Web',
@@ -157,7 +158,7 @@ beforeAll(() => {
     .run();
   db.insert(events).values({ findingId: 1, type: 'created', at: '2026-11-10T21:41:00.000Z' }).run();
   db.insert(decisions)
-    .values({ findingId: 1, policyHash: loadPolicy().hash, configName: 'v1-opus-high-code', triageRunId: 1, action: 'digest', ruleId: 'RULE-SECRET', inputs })
+    .values({ findingId: 1, policyHash: loadPolicy().hash, configName: ACTIVE, triageRunId: 1, action: 'digest', ruleId: 'RULE-SECRET', inputs })
     .run();
 
   const snap = path.join(tmp, 'snapshots', 'web', SHA, 'src');
@@ -189,7 +190,7 @@ describe('page smoke', () => {
 
   it('renders the finding page with untrusted markdown neutralised', async () => {
     const html = await render(() => import('./[id]/page'), { id: '1' });
-    for (const s of ['proxy-addr', 'RULE-SECRET', 'SECRET-REASON', 'shadcn › express › ', 'Triage with v1-opus-high-code', 'Raw CLI result']) {
+    for (const s of ['proxy-addr', 'RULE-SECRET', 'SECRET-REASON', 'shadcn › express › ', `Triage with ${ACTIVE}`, 'Raw CLI result']) {
       expect(html).toContain(s);
     }
     // (React adds its own form-replay <script> for server-action forms; the advisory's must not appear.)
@@ -266,7 +267,7 @@ describe('page smoke', () => {
     // The page shows the pending config's button as disabled; the others stay clickable.
     const html = await render(() => import('./[id]/page'), { id: '1' });
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Triage with v1-sonnet-high-code<\/button>/);
-    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Triage with v1-opus-high-code<\/button>/);
+    expect(html).not.toMatch(new RegExp(`<button[^>]*disabled=""[^>]*>Triage with ${ACTIVE}</button>`));
     db.delete(jobRuns).run();
   });
 

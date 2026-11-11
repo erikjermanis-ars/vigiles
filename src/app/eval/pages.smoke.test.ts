@@ -3,6 +3,7 @@
  * are stubbed). Covers the 'since' anchor text, the malicious remediation, the disabled-project note, the
  * logged link, the policy-action consistency column and the per-refresh volume table.
  */
+import { loadVigilesConfig } from '@/lib/config/load';
 import { MALICIOUS_REMEDIATION } from '@/lib/types';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,6 +43,9 @@ vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined })
 
 let tmp: string;
 let db: Db;
+/** The real config's active triage config (the page reads config/vigiles.yaml). */
+const ACTIVE = loadVigilesConfig().triage.active_config;
+
 let ids: { mal: number; logged: number; latest: number; previous: number };
 
 beforeAll(() => {
@@ -52,7 +56,7 @@ beforeAll(() => {
 
   const { scanId } = insertProject(db, 'web');
   const legacy = insertProject(db, 'legacy', { enabled: false });
-  insertConfig(db, 'v1-opus-high-code', true);
+  insertConfig(db, ACTIVE, true);
   const config = db.select().from(triageConfigs).get()!;
 
   const mal = insertFinding(db, scanId, { packageName: 'evil-pkg', osvId: 'MAL-2026-7', action: 'ping', malicious: true, priority: 'P0' });
@@ -83,8 +87,9 @@ beforeAll(() => {
   insertEvent(db, logged.id, 'decision_changed', '2026-11-05T00:05:00.000Z', { jobRunId: decide, data: { from: 'digest', to: 'log' } });
 
   // Two runs that differ in suggested action only: identical policy action, not identical suggested action.
-  insertTriageRun(db, next.id, config, { output: triageOutput({ verdict: 'affected', suggested_action: 'ping' }) });
+  // (P1 affected → the p1-floor rule digests both, whatever the LLM suggested.)
   insertTriageRun(db, next.id, config, { output: triageOutput({ verdict: 'affected', suggested_action: 'digest' }) });
+  insertTriageRun(db, next.id, config, { output: triageOutput({ verdict: 'affected', suggested_action: 'log' }) });
   insertLabel(db, next.id, 'ping');
 
   ids = { mal: mal.id, logged: logged.id, latest, previous };
@@ -128,7 +133,7 @@ describe('Eval page', () => {
     const html = await render(() => import('./page'), { policy: loadPolicy().hash });
     expect(html).toContain('identical policy action');
     expect(html).toMatch(/Identical policy action.*Identical verdict.*Identical suggested action/);
-    expect(html).toContain('v1-opus-high-code 1 2 100% (1/1) 100% (1/1) 0% (0/1)');
+    expect(html).toContain(`${ACTIVE} 1 2 100% (1/1) 100% (1/1) 0% (0/1)`);
     expect(html).toContain('Baseline-origin findings, current decisions');
     expect(html).toContain('Volume per refresh');
     expect(html).toMatch(new RegExp(`#${ids.latest} \\d+ \\w+ ago 2 \\(2 findings\\) 0 \\(0 findings\\) 1 web 2 / 0`));

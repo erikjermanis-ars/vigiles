@@ -92,7 +92,8 @@ describe('config/policy.yaml (the real file)', () => {
     });
   });
 
-  it('digests a P1 that is not affected (Next.js Windows-only RCE on Linux hosting)', () => {
+  // Scenarios from the 2026-11-11 labeling round (policy v2 + the owner's rubric).
+  it('logs a P1 that is verifiably not affected when the LLM also suggests log (Next.js Windows-only RCE on Linux)', () => {
     const nextWindowsRce = triaged({
       priority: 'P1',
       cvss: 9.8,
@@ -102,40 +103,47 @@ describe('config/policy.yaml (the real file)', () => {
       verdict: 'not_affected',
       confidence: 'high',
       deployment_conditions_met: 'no',
-      suggested_action: 'digest',
+      suggested_action: 'log',
     });
-    expect(decide(nextWindowsRce)).toEqual({ action: 'digest', ruleId: 'p1-not-affected' });
+    expect(decide(nextWindowsRce)).toEqual({ action: 'log', ruleId: 'p1-clearly-not-affected' });
   });
 
-  it('pings a P1 that is likely affected', () => {
-    expect(decide(triaged({ priority: 'P1', verdict: 'likely_affected', confidence: 'medium' }))).toEqual({
-      action: 'ping',
-      ruleId: 'p1-affected',
+  it('keeps a not-affected P1 in the digest when confidence is only medium, or the LLM suggests digest', () => {
+    expect(decide(triaged({ priority: 'P1', verdict: 'not_affected', confidence: 'medium', suggested_action: 'log' }))).toEqual({
+      action: 'digest',
+      ruleId: 'p1-floor',
     });
-  });
-
-  it('raises a P2 with a confirmed attacker path on an internet-facing asset when the LLM itself suggests ping', () => {
-    const i = triaged({
-      priority: 'P2',
-      verdict: 'affected',
+    // Storybook dev-server flaw: production unaffected, developer machines at risk (rubric ruling 1).
+    const storybook = triaged({
+      priority: 'P1',
+      runtime_usage: 'build_or_tooling_only',
+      verdict: 'not_affected',
       confidence: 'high',
-      exposure: 'internet-facing',
-      attacker_reachable: 'yes',
-      suggested_action: 'ping',
-    });
-    expect(decide(i)).toEqual({ action: 'ping', ruleId: 'p2-raise' });
-  });
-
-  it('does not raise a reachable P2 the LLM itself only suggests as digest (e.g. admin-only DoS)', () => {
-    const i = triaged({
-      priority: 'P2',
-      verdict: 'affected',
-      confidence: 'medium',
-      exposure: 'internet-facing',
-      attacker_reachable: 'yes',
       suggested_action: 'digest',
     });
-    expect(decide(i)).toEqual({ action: 'digest', ruleId: 'p2-affected' });
+    expect(decide(storybook)).toEqual({ action: 'digest', ruleId: 'p1-floor' });
+  });
+
+  it('keeps an affected P1 the LLM rates digest (e.g. a reachable DoS) in the digest, never lower', () => {
+    expect(decide(triaged({ priority: 'P1', verdict: 'likely_affected', confidence: 'medium', suggested_action: 'digest' }))).toEqual({
+      action: 'digest',
+      ruleId: 'p1-floor',
+    });
+    expect(decide(triaged({ priority: 'P1', verdict: 'affected', suggested_action: 'log' }))).toEqual({ action: 'digest', ruleId: 'p1-floor' });
+  });
+
+  it('pings when the LLM suggests ping and the verdict backs it, at any priority', () => {
+    for (const priority of ['P1', 'P2'] as const) {
+      expect(decide(triaged({ priority, verdict: 'likely_affected', confidence: 'medium', suggested_action: 'ping' }))).toEqual({
+        action: 'ping',
+        ruleId: 'llm-ping',
+      });
+    }
+  });
+
+  it('does not ping on a ping suggestion the verdict does not back', () => {
+    const i = triaged({ priority: 'P2', verdict: 'likely_not_affected', confidence: 'medium', suggested_action: 'ping' });
+    expect(decide(i)).toEqual({ action: 'log', ruleId: 'default' });
   });
 
   it('parsePolicy rejects typos at load time', () => {
@@ -146,25 +154,23 @@ rules:
     expect(() => parsePolicy(bad)).toThrow(/afected/);
   });
 
-  it('digests an affected P2 when attacker reachability is unknown', () => {
-    const i = triaged({
-      priority: 'P2',
-      verdict: 'affected',
-      confidence: 'high',
-      exposure: 'internet-facing',
-      attacker_reachable: 'unknown',
-    });
-    expect(decide(i)).toEqual({ action: 'digest', ruleId: 'p2-affected' });
+  it('digests a reachable P2 the LLM rates digest (e.g. an authenticated DoS)', () => {
+    const zod = triaged({ priority: 'P2', verdict: 'likely_affected', confidence: 'medium', attacker_reachable: 'yes', suggested_action: 'digest' });
+    expect(decide(zod)).toEqual({ action: 'digest', ruleId: 'llm-digest' });
   });
 
-  it('does not raise a P2 on an internal asset even with a reachable attacker', () => {
-    const i = triaged({ priority: 'P2', verdict: 'affected', confidence: 'high', exposure: 'internal', attacker_reachable: 'yes' });
-    expect(decide(i)).toEqual({ action: 'digest', ruleId: 'p2-affected' });
+  it('digests a tooling-only P2 when the LLM flags developer-machine risk (rubric ruling 1)', () => {
+    const viteDevServer = triaged({ priority: 'P2', runtime_usage: 'build_or_tooling_only', verdict: 'not_affected', suggested_action: 'digest' });
+    expect(decide(viteDevServer)).toEqual({ action: 'digest', ruleId: 'llm-digest' });
   });
 
-  it('logs a P2 used only by build tooling and not affected', () => {
-    const i = triaged({ priority: 'P2', runtime_usage: 'build_or_tooling_only', verdict: 'not_affected', dev_only: true });
+  it('logs a P2 used only by build tooling, not affected, with no developer-machine risk', () => {
+    const i = triaged({ priority: 'P2', runtime_usage: 'build_or_tooling_only', verdict: 'not_affected', dev_only: true, suggested_action: 'log' });
     expect(decide(i)).toEqual({ action: 'log', ruleId: 'tooling-only' });
+  });
+
+  it('keeps an affected P2 in the digest even if the LLM suggests log', () => {
+    expect(decide(triaged({ priority: 'P2', verdict: 'affected', suggested_action: 'log' }))).toEqual({ action: 'digest', ruleId: 'p2-affected' });
   });
 
   it('logs a P2 whose triage was skipped', () => {

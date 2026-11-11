@@ -23,6 +23,7 @@ thresholds:
   cvss_high: 7.0
 
 rules:
+  # --- Safety rules: fire before any LLM judgement is trusted ---
   - id: malicious
     when: { malicious: true }
     then: ping
@@ -41,33 +42,39 @@ rules:
   - id: p0-unless-clearly-not
     when: { priority: P0, not: { verdict: not_affected, confidence: high } }
     then: ping
+    note: P0 = exploited in the wild (KEV) on an exposed asset, or a malicious package. Only a confident "not affected" lowers it.
 
   - id: p0-not-affected
     when: { priority: P0 }
     then: digest
     note: Never silenced; the reasoning is shown.
 
-  - id: p1-affected
-    when: { priority: P1, verdict: [affected, likely_affected] }
-    then: ping
-
-  - id: p1-not-affected
-    when: { priority: P1 }
-    then: digest
-
-  - id: p2-raise
-    when:
-      priority: P2
-      verdict: affected
-      confidence: [high, medium]
-      exposure: internet-facing
-      attacker_reachable: 'yes'
-      suggested_action: ping
+  # --- Triaged findings: the LLM applies the owner's rubric (prompt v2 §7); these rules bound it ---
+  - id: llm-ping
+    when: { suggested_action: ping, verdict: [affected, likely_affected] }
     then: ping
     note: >
-      The LLM may raise urgency when it shows a concrete attacker path AND itself suggests ping.
-      attacker_reachable 'yes' also covers paths that need a login or a privileged role (see exploit_conditions),
-      so requiring suggested_action keeps admin-only DoS from paging.
+      Real, quick harm per the rubric, with the verdict backing it (affected or likely affected).
+      Covers the rubric's "unresolved severe reachability → ping". Replaces v1's p1-affected and p2-raise.
+
+  - id: p1-clearly-not-affected
+    when: { priority: P1, verdict: not_affected, confidence: high, suggested_action: log }
+    then: log
+    note: >
+      Added 2026-11-11 after labeling: a P1 that is verifiably not exploitable here (e.g. a Windows-only flaw on
+      Linux hosting, a package only a CLI pulls in) is noise in the digest. Only when all three agree.
+
+  - id: p1-floor
+    when: { priority: P1 }
+    then: digest
+    note: Any other P1 (high CVSS on an internet-facing asset, or high EPSS) is at least reported weekly.
+
+  - id: llm-digest
+    when: { suggested_action: digest }
+    then: digest
+    note: >
+      Added 2026-11-11: the rubric's digest cases include developer-machine risk and latent severe flaws, which the
+      tooling-only rule below used to log. Trust the LLM's digest before falling through.
 
   - id: tooling-only
     when:
@@ -78,6 +85,7 @@ rules:
   - id: p2-affected
     when: { priority: P2, verdict: [affected, likely_affected] }
     then: digest
+    note: Floor for an affected P2 even if the LLM suggested log.
 
   - id: default
     when: {}

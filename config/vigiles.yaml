@@ -11,13 +11,23 @@ osv:
   ecosystems: [] # extra ecosystems to keep fresh; the ones found in lockfiles are always synced
 
 triage:
-  active_config: v1-opus-high-code # drives decisions; exactly one
+  active_config: v2-opus-high-code # drives decisions; exactly one
   min_priority: P2 # P0..P2 are triaged; P3 is not
   max_per_run: 25 # cap per triage job (protects subscription usage)
   concurrency: 2
   timeout_minutes: 10
   max_budget_usd_per_run: 3 # passed to claude --max-budget-usd (list-price equivalent)
   configs:
+    - name: v2-opus-high-code # prompt v2 = v1 + the owner's ping/digest/log rubric (2026-11-11)
+      prompt_version: v2
+      model: opus
+      effort: high
+      code_access: true
+    - name: v2-sonnet-high-code
+      prompt_version: v2
+      model: sonnet
+      effort: high
+      code_access: true
     - name: v1-opus-high-code
       prompt_version: v1
       model: opus

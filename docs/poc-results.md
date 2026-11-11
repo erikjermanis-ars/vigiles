@@ -1,4 +1,40 @@
-# POC results: first run (before labeling)
+# POC results
+
+## Round 2 (2026-11-11): labeled, tuned, re-tested
+
+Labels: 54 P0–P2 findings labeled blind by Claude agents applying the owner's rubric (labeler `agent-rubric`). The rubric:
+- **ping** means real harm, quickly.
+- **digest** means real but not serious; fix within 1–2 weeks.
+- **log** means not a real threat.
+
+Three edge-case rulings were added: developer-machine risk → digest; a latent severe flaw in shipped code → digest; severe reachability that can't be ruled out → ping.
+
+| Decider | Matches labels |
+|---|---|
+| Base priority only (CVSS/EPSS/KEV) | 7 / 54 (13%) |
+| Policy v1 × prompt v1 (round 1) | 45 / 54 (83%) |
+| Policy v2 × prompt v1 (policy fix only, no LLM calls) | 50 / 54 (93%) |
+| **Policy v2 × prompt v2 (rubric in the prompt)** | **54 / 54 (100%)** |
+
+**Consistency** (20 findings triaged twice): the policy action was identical in 20 of 20 (target ≥ 90%). The verdict was identical in 18 of 20; the two differences were a one-step shift (likely vs. definite), with the same action.
+
+**Cost**: 54 + 20 runs on Opus, $7.30 in total. That's $0.10 and 22 s per finding on average.
+
+**Changes**:
+- `config/policy.yaml` v2 (`4bea76511f6c`):
+  - New `llm-ping` rule.
+  - New `p1-clearly-not-affected` → log.
+  - `p1-floor` → digest.
+  - New `llm-digest`, placed before `tooling-only`.
+  - Removed `p1-affected` and `p2-raise`.
+- `prompts/triage/v2.system.md`: §7 now contains the owner's rubric and rulings.
+- The active config is `v2-opus-high-code`.
+
+**Caveat**: the labels come from the same model family, given the same rubric text that is now in the prompt. 100% shows that Vigiles applies the rubric the way Claude reads it. It does not yet show that it matches the owner's own judgement; validate that with human labels on a sample.
+
+---
+
+## Round 1: first run (before labeling)
 
 2026-11-11 · how-clutch-web `origin/main` @ 9bff790 · active config `v1-opus-high-code` · policy `dca8713daaea`
 
