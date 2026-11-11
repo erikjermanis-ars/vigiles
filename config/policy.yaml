@@ -1,0 +1,84 @@
+# Decision policy (docs/poc-spec.md §8, §10). First matching rule wins.
+# Editing this file creates a new policy version (by content hash); "Re-evaluate policy" applies it
+# to every open finding instantly from stored triage results, with no LLM calls.
+#
+# Condition syntax (all keys must match):
+#   field: value            equality
+#   field: [a, b]           any of
+#   field: { gte: 0.5 }     numeric range (gte, gt, lte, lt); null never matches
+#   not: { ... }            negation of a nested condition
+#   {}                      always matches
+#
+# Fields: priority, malicious, in_kev, epss, cvss, exposure, criticality, direct, dev_only,
+#   fix_available, triage_status (ok|failed|pending|skipped), verdict, confidence, runtime_usage,
+#   vulnerable_code_used, attacker_reachable, deployment_conditions_met, suggested_action
+
+# Base priority thresholds (§8): P0 = malicious, or KEV and (internet-facing or high criticality);
+# P1 = KEV, or EPSS >= epss_high, or CVSS >= cvss_critical on an internet-facing asset;
+# P2 = CVSS >= cvss_high, or EPSS >= epss_medium; P3 = everything else.
+thresholds:
+  epss_high: 0.5
+  epss_medium: 0.1
+  cvss_critical: 9.0
+  cvss_high: 7.0
+
+rules:
+  - id: malicious
+    when: { malicious: true }
+    then: ping
+    note: A malicious package in the lockfile means a compromised install. Always urgent.
+
+  - id: no-verdict-urgent
+    when: { priority: [P0, P1], triage_status: [pending, failed] }
+    then: ping
+    note: Fail loud. Missing or failed triage never hides a P0/P1.
+
+  - id: no-verdict-p2
+    when: { priority: P2, triage_status: [pending, failed] }
+    then: digest
+    note: Untriaged P2s (e.g. beyond triage.max_per_run) stay visible instead of falling through to log.
+
+  - id: p0-unless-clearly-not
+    when: { priority: P0, not: { verdict: not_affected, confidence: high } }
+    then: ping
+
+  - id: p0-not-affected
+    when: { priority: P0 }
+    then: digest
+    note: Never silenced; the reasoning is shown.
+
+  - id: p1-affected
+    when: { priority: P1, verdict: [affected, likely_affected] }
+    then: ping
+
+  - id: p1-not-affected
+    when: { priority: P1 }
+    then: digest
+
+  - id: p2-raise
+    when:
+      priority: P2
+      verdict: affected
+      confidence: [high, medium]
+      exposure: internet-facing
+      attacker_reachable: 'yes'
+      suggested_action: ping
+    then: ping
+    note: >
+      The LLM may raise urgency when it shows a concrete attacker path AND itself suggests ping.
+      attacker_reachable 'yes' also covers paths that need a login or a privileged role (see exploit_conditions),
+      so requiring suggested_action keeps admin-only DoS from paging.
+
+  - id: tooling-only
+    when:
+      runtime_usage: [build_or_tooling_only, not_used]
+      verdict: [likely_not_affected, not_affected]
+    then: log
+
+  - id: p2-affected
+    when: { priority: P2, verdict: [affected, likely_affected] }
+    then: digest
+
+  - id: default
+    when: {}
+    then: log

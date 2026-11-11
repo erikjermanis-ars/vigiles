@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+.env*
+.DS_Store
+coverage/
+# runtime data lives in ~/.vigiles (see config/vigiles.yaml); never commit a local data dir
+data/

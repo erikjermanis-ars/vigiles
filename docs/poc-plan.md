@@ -4,16 +4,23 @@
 
 Each milestone ends in something you can run and check. The order follows the data: you can't tune a decision before there are findings, and you can't evaluate before there are labels. Sizes are rough (S ≈ half a day, M ≈ 1 day, L ≈ 2 days of focused work with Claude Code).
 
-| # | Milestone | Size | You can… |
-|---|---|---|---|
-| M0 | Spikes | S | trust the three external tools before building on them |
-| M1 | Skeleton | M | start the app, trigger a job, watch it run |
-| M2 | Scan pipeline | L | see how-clutch-web's findings with KEV/EPSS/CVSS and base priority |
-| M3 | Dependency facts | M | see direct or transitive, dev-only, paths and import sites per finding |
-| M4 | Triage | L | read Claude's verdict and evidence for each P0–P2 finding |
-| M5 | Policy + Inbox | M | see what would have pinged, and change it by editing YAML |
-| M6 | Labeling + Eval | L | label findings and measure agreement; run experiments |
-| M7 | More projects | M | add held-api (and held-ios) and check the exit criteria |
+| # | Milestone | Size | You can… | Status (2026-11-10) |
+|---|---|---|---|---|
+| M0 | Spikes | S | trust the three external tools before building on them | ✅ [spikes.md](spikes.md) |
+| M1 | Skeleton | M | start the app, trigger a job, watch it run | ✅ |
+| M2 | Scan pipeline | L | see how-clutch-web's findings with KEV/EPSS/CVSS and base priority | ✅ 118 findings on real data |
+| M3 | Dependency facts | M | see direct or transitive, dev-only, paths and import sites per finding | ✅ per installed version |
+| M4 | Triage | L | read Claude's verdict and evidence for each P0–P2 finding | ✅ real Opus runs |
+| M5 | Policy + Inbox | M | see what would have pinged, and change it by editing YAML | ✅ |
+| M6 | Labeling + Eval | L | label findings and measure agreement; run experiments | ✅ built; **labeling is yours** |
+| M7 | More projects | M | add held-api (and held-ios) and check the exit criteria | ⏳ profiles drafted, `enabled: false` |
+
+Everything is built, verified with the test suite and a live run, and reviewed twice by independent agents (37 integration findings confirmed and fixed). What remains needs you:
+
+1. Label findings on **Review**.
+2. Iterate the prompt and policy against **Eval**.
+3. Confirm the ⚠ profile values and enable held-api / held-ios.
+4. Run the §11.3 experiments.
 
 ---
 

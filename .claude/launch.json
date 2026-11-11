@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vigiles-web",
+      "runtimeExecutable": "/Users/erikjermanis/.nvm/versions/node/v24.18.1/bin/node",
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "-H", "127.0.0.1", "-p", "3900"],
+      "port": 3900
+    }
+  ]
+}

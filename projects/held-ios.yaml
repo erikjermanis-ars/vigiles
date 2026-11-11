@@ -1,0 +1,24 @@
+# Project profile (docs/poc-spec.md §14). Disabled until you decide to add it (set enabled: true).
+id: held-ios
+name: Held iOS
+enabled: false
+repo_path: /Users/erikjermanis/work/held-ios
+ref: origin/main # ⚠ origin/HEAD points at develop; main assumed to be the App Store release branch
+fetch_before_scan: true
+exclude: []
+lockfiles: [held.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved]
+owners: [Erik]
+criticality: medium # ⚠
+exposure: internal # ⚠ a client app: no server exposure; attacker input arrives via the API, deep links and push payloads
+data_classes: [pii, health] # ⚠ heart-rate/HRV via Spren SDK
+runtime:
+  language: swift
+  frameworks: [swiftui]
+deployments:
+  - env: production
+    hosting: App Store
+third_party_services: [firebase, mixpanel, spren] # ⚠
+mitigations: ''
+notes: >
+  SwiftPM only (Package.resolved, 42 packages). OSV's SwiftURL data is thin (0 findings on 2026-11-10);
+  most iOS risk sits in vendor SDKs, which is the news sweep's territory.

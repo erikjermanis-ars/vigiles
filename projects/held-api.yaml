@@ -1,0 +1,26 @@
+# Project profile (docs/poc-spec.md §14). Disabled until you decide to add it (set enabled: true).
+# Values marked ⚠ are guesses from the repo; confirm before enabling.
+id: held-api
+name: Held API + Dashboard
+enabled: false
+repo_path: /Users/erikjermanis/work/held-api
+ref: origin/main # ⚠ origin/HEAD points at qa; main assumed to be production
+fetch_before_scan: true
+exclude: []
+lockfiles: [backend/package-lock.json, dashboard/package-lock.json]
+owners: [Erik]
+criticality: medium # ⚠
+exposure: internet-facing # ⚠ public REST API used by the iOS app
+data_classes: [pii] # ⚠ user accounts, meditation session data
+runtime:
+  language: typescript
+  node: '22'
+  frameworks: [nestjs-11, prisma-6, react-18, vite]
+deployments:
+  - env: production
+    hosting: ⚠ backend runs in Docker (node:22-alpine), see backend/aws/Dockerfile; dashboard is a static SPA
+third_party_services: [] # ⚠
+mitigations: ''
+notes: >
+  Two lockfiles: backend (NestJS API) and dashboard (admin SPA, React + Vite).
+  OS packages inside the node:22-alpine image are not scanned by the POC.

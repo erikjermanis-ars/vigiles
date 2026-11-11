@@ -1,0 +1,2 @@
+# Vigiles passes this file to osv-scanner with --config so that an osv-scanner.toml inside a
+# scanned repo cannot silently ignore vulnerabilities. Keep it free of [[IgnoredVulns]].

@@ -1,0 +1,28 @@
+# Project profile (docs/poc-spec.md §14). Values marked ⚠ need confirming.
+id: how-clutch-web
+name: HowClutch Web
+enabled: true
+repo_path: /Users/erikjermanis/work/how-clutch-web
+ref: origin/main
+fetch_before_scan: true # git fetch origin main; the scan continues on the existing ref with a warning on failure
+exclude: [] # globs; ignored/untracked files are never seen anyway (scans read git, not the working tree)
+owners: [Erik] # names only; Slack IDs come with the production build
+criticality: high # ⚠ holds data on youth players and their guardians
+exposure: internet-facing # public site + authenticated platform
+data_classes: [pii, minors-pii] # ⚠
+runtime:
+  language: typescript
+  node: '24.18'
+  frameworks: [nextjs-16, react-19, supabase]
+deployments:
+  - env: production
+    hosting: AWS Amplify (Linux, Next.js SSR). Two Amplify apps build from this repo, the platform and the public site.
+  - env: production
+    hosting: Storybook static build synced to S3 by GitHub Actions (main and design branches). Static files only; no Storybook dev server is exposed.
+third_party_services: [supabase, aws-amplify, aws-ses, aws-s3, posthog]
+mitigations: >
+  ⚠ Fill in: auth is Supabase OTP; what sits behind login; any WAF/CDN in front of Amplify; upload size limits.
+notes: >
+  `shadcn` is a CLI listed under `dependencies`; it is never imported at runtime, so packages that only
+  come in through it (express, body-parser, @modelcontextprotocol/sdk, ...) are not shipped.
+  Supabase edge functions (supabase/functions, Deno) have no lockfile and are not covered by matching.

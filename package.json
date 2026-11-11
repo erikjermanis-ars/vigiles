@@ -1,0 +1,53 @@
+{
+  "name": "vigiles",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Vulnerability monitor POC: matches advisories against project lockfiles, triages them with Claude, and decides who to ping.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n web,worker -c blue,magenta \"npm:dev:web\" \"npm:dev:worker\"",
+    "dev:web": "next dev -H 127.0.0.1 -p 3900",
+    "dev:worker": "node --import tsx src/worker/index.ts",
+    "build": "next build",
+    "start": "concurrently -k -n web,worker -c blue,magenta \"next start -H 127.0.0.1 -p 3900\" \"node --import tsx src/worker/index.ts\"",
+    "worker": "node --import tsx src/worker/index.ts",
+    "job": "node --import tsx src/cli/job.ts",
+    "db:generate": "drizzle-kit generate",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "drizzle-orm": "0.45.4",
+    "next": "16.4.4",
+    "picomatch": "4.0.7",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.4",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "24.13.2",
+    "@types/picomatch": "4.0.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "concurrently": "10.0.6",
+    "drizzle-kit": "0.31.11",
+    "oxlint": "1.90.0",
+    "postcss": "8.5.32",
+    "prettier": "3.9.10",
+    "tailwindcss": "4.3.4",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12"
+  }
+}

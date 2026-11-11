@@ -98,7 +98,7 @@ Each project names a ref (default `origin/main`). A scan resolves it to a commit
 - The working tree has git-ignored folders with their own lockfiles (`howclutch-main/`, `howclutch-platform-main/` containing pnpm, deno and pip files, and `.claude/worktrees/*/package-lock.json`). A filesystem scan would report them as part of the project.
 - The working tree has `.env`, `.env.local` and `.env.prod`. Triage must never see them.
 
-Lockfiles are discovered with `git ls-tree` on that commit. The code that triage reads is a `git archive` snapshot of the same commit, so it never contains ignored or untracked files.
+Lockfiles are discovered with `git ls-tree` on that commit. The code that triage reads is a snapshot of the same commit written from git's object database (§7.1), so it never contains ignored or untracked files.
 
 ### 3.5 Triage: `claude -p`, locked down
 
@@ -199,7 +199,7 @@ The only job that genuinely needs a `since` cursor is the deferred **news sweep*
             │ polls job_runs → sync-osv · sync-kev · scan · enrich · triage · decide │
             └──┬──────────────┬───────────────┬───────────────────┬────────────────┘
                │              │               │                   │
-         git archive    osv-scanner      KEV / EPSS          claude -p (read-only,
+         git ls-tree    osv-scanner      KEV / EPSS          claude -p (read-only,
          git ls-tree    (offline DB)     (HTTPS)             snapshot as cwd)
                │              │               │                   │
                └──────────────┴──── ~/.vigiles/ (vigiles.db, osv-db/, snapshots/, logs/) ┘
@@ -240,7 +240,7 @@ vigiles/
 
 | Job | Params | Does |
 |---|---|---|
-| `sync-osv` | — | Runs osv-scanner with `--download-offline-databases` over all projects' lockfiles, which refreshes the ecosystems in use. Records the DB timestamp. |
+| `sync-osv` | — | Downloads `<Ecosystem>/all.zip` for every ecosystem in use, configured, or synced before. It uses conditional requests (ETag/If-Modified-Since) and swaps the file in atomically, because osv-scanner's own `--download-offline-databases` never refreshes an existing zip. Records `feed_state 'osv:<Ecosystem>'`. |
 | `sync-kev` | — | Downloads the KEV JSON and upserts the `kev` table |
 | `scan` | `project?` | Per project: resolve ref (+ fetch), snapshot, discover lockfiles, build inventory, run osv-scanner offline, diff against open findings, write events |
 | `enrich` | — | EPSS for open findings' CVEs, KEV join, CVSS score, base priority. Writes `escalated` events on upward moves. |
@@ -262,7 +262,11 @@ Job runner rules:
 
 ### 7.1 Snapshot
 
-`git archive <sha> | tar -x -C ~/.vigiles/snapshots/<project>/<sha>/`, cached by SHA. After extraction, delete `.claude/` and any `.env*` from the snapshot. That is redundant with `--restricted` and `--safe-mode`, but cheap.
+Written from git's object database (`git ls-tree -r -z <sha>`, then one `git cat-file --batch` stream) into `~/.vigiles/snapshots/<project>/<sha>/`, cached by SHA and published atomically. Rules:
+
+- Regular files are written 0600 or 0700. Symlinks and submodules are skipped and counted.
+- Any path segment named `.git` or `.claude`, or starting with `.env`, is never written (case-insensitive). This is redundant with `--restricted` and `--safe-mode`, but cheap.
+- `git archive` is not used, because a target repo's `.gitattributes` `export-ignore`/`export-subst` could hide or rewrite code.
 
 ### 7.2 Lockfile discovery
 
@@ -585,7 +589,41 @@ The POC holds a map of client projects' weaknesses. Small, cheap safeguards:
 
 ---
 
-## 16. Out of scope for the POC (and where each goes)
+## 16. Implementation notes (decided while building, 2026-11-10)
+
+Where the build differs from or sharpens the sections above:
+
+- **Triage input hash (§9.1)** covers:
+  - the advisory's `modified`
+  - per-version dependency facts (`findings.instances`)
+  - the uncapped import-site count
+  - a hash of only the **profile fields the prompt shows** (`projects.triage_profile_hash`). Scanner settings such as `enabled`, `fetch_before_scan` or `exclude` never invalidate verdicts.
+  - the prompt version **plus a hash of the prompt files**, so editing `prompts/triage/v1.*` in place invalidates cached runs.
+- **Policy (§10)**:
+  - Untriaged P2s go to **digest** (`no-verdict-p2`), so findings past `max_per_run` stay visible.
+  - `p2-raise` also requires the LLM's own `suggested_action: ping`, so admin-only DoS doesn't page.
+  - `config/policy.yaml` is validated when it loads (unknown fields and impossible enum values fail).
+- **Decisions**:
+  - Findings that haven't been enriched yet get no decision. They count as undecided and are never silently logged.
+  - Findings of disabled projects are inactive: not enriched, not decided, and not in the Inbox or Eval volume. Triage runs on them only when they are named explicitly (`--project`/`--findings`), the same as `scan --project`.
+- **Events**: a finding's first decision writes `decision_changed` with `from: null`. "Since last refresh" covers everything after the *previous* successful Refresh all finished, so failed or cancelled refreshes and single jobs in between are included.
+- **refresh-all**:
+  - `sync-osv`, `sync-kev` and `triage` failures are warnings.
+  - A `scan` failure still runs enrich, triage and decide, then marks the refresh failed.
+  - `enrich` and `decide` failures stop the refresh.
+- **Triage retries**: only real triage failures count toward the 2-runs-per-hash cap (invalid output, timeouts, budget or turn limits). Infrastructure failures don't, such as an outage, a usage limit or a spawn error.
+- **Concurrency**: `job_runs.pid` records the owning process.
+  - A restart reclaims only rows whose process is gone.
+  - Two triage jobs never run at once.
+  - Ctrl-C or SIGTERM cancels the running job and records it as `cancelled`. The worker and CLI therefore run under `node --import tsx`, not the tsx CLI, which SIGKILLs its child.
+- **osv-scanner**:
+  - It runs with `--offline --no-resolve`, so nothing leaves the machine.
+  - It also gets `--config config/osv-scanner.toml`. Otherwise an `osv-scanner.toml` committed in a target repo can silently ignore advisories (verified: 137 → 136).
+  - Lockfiles are passed as `-L :<path>`, so a `:` in a path can't be parsed as a type prefix.
+- **Dashboard hardening**: `src/proxy.ts` returns 403 unless the Host is `127.0.0.1`, `localhost` or `[::1]` (DNS-rebinding guard). Next's own dev-only endpoints run before the proxy, so `npm run build && npm start` is the safer way to run day to day.
+- **Labels**: the labeler is chosen on the Review page (cookie, default `me`), so a second developer can label without overwriting yours.
+
+## 17. Out of scope for the POC (and where each goes)
 
 | Item | When |
 |---|---|
@@ -598,7 +636,7 @@ The POC holds a map of client projects' weaknesses. Small, cheap safeguards:
 
 ---
 
-## 17. Risks and things to verify early (M0 in the plan)
+## 18. Risks and things to verify early (M0 in the plan)
 
 | Risk | Mitigation |
 |---|---|
