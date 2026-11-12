@@ -1,26 +1,196 @@
-# Project profile (docs/poc-spec.md §14). Disabled until you decide to add it (set enabled: true).
-# Values marked ⚠ are guesses from the repo; confirm before enabling.
+# Project profile (docs/poc-spec.md §14). Checked against the repo at origin/main (7cab81c9, 2026-11-06).
+# Comments are dropped when the profile is loaded; every fact triage needs is in a value.
 id: held-api
 name: Held API + Dashboard
-enabled: false
+enabled: true
 repo_path: /Users/erikjermanis/work/held-api
-ref: origin/main # ⚠ origin/HEAD points at qa; main assumed to be production
+# Production = main. qa is the integration branch (origin/HEAD) and reaches production by merging qa into main
+# ("Merge pull request #111 from arsfutura/qa"). A push to qa deploys only the QA host (.github/workflows/deploy-qa.yml).
+ref: origin/main
 fetch_before_scan: true
 exclude: []
 lockfiles: [backend/package-lock.json, dashboard/package-lock.json]
 owners: [Erik]
-criticality: medium # ⚠
-exposure: internet-facing # ⚠ public REST API used by the iOS app
-data_classes: [pii] # ⚠ user accounts, meditation session data
+criticality: high
+exposure: internet-facing
+data_classes: [pii, health, credentials]
 runtime:
   language: typescript
-  node: '22'
-  frameworks: [nestjs-11, prisma-6, react-18, vite]
+  node: '22.10.0'
+  node_notes: >
+    Production image pins node:22.10.0-alpine (backend/aws/Dockerfile; RELEASE.md confirms Node 22.10 in
+    production). The QA host runs Node 22.17 via nvm. backend/.nvmrc ('20') is stale.
+  platform: linux/arm64, Alpine (musl) container on AWS ECS
+  frameworks: [nestjs-11, express-5, prisma-6, postgresql, firebase-admin-13, react-18, vite-6, react-router-7]
+  build: >
+    Backend compiled with `nest build` (tsc, no webpack bundling). The image runs `npm install` (not `npm ci`;
+    `--frozen-lockfile` is a Yarn flag npm ignores). package.json and the lockfile agree, so locked versions are
+    installed.
+  resolved_versions: >
+    Backend: @nestjs/core, @nestjs/common and @nestjs/platform-express 11.1.1, express 5.1.0, body-parser 2.2.0,
+    qs 6.14.0, send 1.2.0, serve-static 2.2.0, multer 1.4.5-lts.2 (busboy 1.6.0), path-to-regexp 8.2.0 (8.3.0
+    under @nestjs/serve-static), class-validator 0.14.2, prisma and @prisma/client 6.8.2, firebase-admin 13.4.0,
+    firebase 11.10.0, jsonwebtoken 9.0.2, axios 1.11.0, follow-redirects 1.15.9, satori 0.28.2,
+    @resvg/resvg-js 2.6.2, sanitize-html 2.17.5 (htmlparser2 10.1.0), swagger-ui-dist 5.21.0,
+    puppeteer 24.43.1, tar-fs 3.1.3, ws 8.21.0. Dashboard: react and react-dom 18.3.1, react-router(-dom) 7.8.1,
+    axios 1.11.0, vite 6.3.5 (dev), esbuild 0.25.9 (dev).
 deployments:
   - env: production
-    hosting: ⚠ backend runs in Docker (node:22-alpine), see backend/aws/Dockerfile; dashboard is a static SPA
-third_party_services: [] # ⚠
-mitigations: ''
+    component: backend API (NestJS)
+    hosting: >
+      AWS CodeBuild (backend/aws/buildspec.yaml) builds backend/aws/Dockerfile, pushes the image to ECR and
+      writes imagedefinitions.json for an ECS deploy. RELEASE.md refers to the ECS task revision (:145) and notes
+      that ECS has no deployment circuit breaker. backend/Dockerfile (node:22-alpine with ffmpeg) is not referenced
+      by any pipeline in the repo.
+    container_base_image: public.ecr.aws/docker/library/node:22.10.0-alpine (linux/arm64)
+    process: >
+      One `npm run start:prod` = `node dist/main` process per task (HTTP server plus @nestjs/schedule crons; the
+      async-task leader lock suggests more than one task may run). No pm2 and no render worker. Prisma generate and
+      `prisma migrate deploy` run at image build time. PUPPETEER_SKIP_DOWNLOAD=true (no Chromium) and no ffmpeg is
+      installed. The runtime stage is `FROM build`, so the image holds the source, the generated Prisma client and
+      the `npm prune --prod` node_modules (including build CLIs listed under dependencies). DATABASE_URL,
+      SENTRY_DSN and SENTRY_AUTH_TOKEN are build args persisted as image ENV.
+    public: >
+      Yes. api.held.app (QA's PROMOTE_ENV_URL). link.held.app universal links are answered by this app
+      (LinkHeldAppRedirectMiddleware, DEFAULT_DEEP_LINK_HOST). TLS terminates upstream (the code reads
+      x-forwarded-proto); no load balancer, WAF or CDN config is in the repo.
+    users: >
+      Held iOS app members (main client, self-service sign-up), staff using the dashboard, Apple App Store Server
+      Notifications, staff browsers on the QA dashboard posting session promotes straight to production
+      (VITE_PROMOTE_ENV_URL), and the QA backend forwarding circle promotes (PROMOTE_TARGET_URL).
+  - env: production
+    component: dashboard (staff admin SPA)
+    hosting: >
+      Static Vite build (dashboard/aws/buildspec.yaml: CodeBuild nodejs 22, `npm ci`, VITE_HELD_API_URL from SSM
+      /prod/web/) synced to S3 bucket held-web-prod and served by CloudFront, presumably at dashboard.held.app
+      (the API's CORS allow-list). Static files only, no server runtime.
+    public: >
+      Reachable on the internet. Every route sits behind ProtectedRoute (client-side admin check); the API
+      enforces admin server-side.
+    users: Held staff (session and circle editors, admins).
+  - env: qa
+    production: false
+    note: >
+      Not production. Listed because it explains the QA-only code paths that ship in the same backend lockfile.
+    component: backend API + render worker + dashboard
+    hosting: >
+      Single Ubuntu 24.04 amd64 host (~1.9 GB RAM), deployed by GitHub Actions over SSH on push to qa
+      (.github/workflows/deploy-qa.yml, `npm install`). pm2 runs heldqa-api and heldqa-render-worker
+      (ecosystem.config.js, WORKER_MODE=render-worker: Puppeteer Chromium + ffmpeg video export). The backend also
+      serves the dashboard build at /dashboard. Public at heldqa-api.arsfutura.co.
+third_party_services:
+  - aws-ecs
+  - aws-ecr
+  - aws-codebuild
+  - aws-s3
+  - aws-cloudfront
+  - aws-bedrock
+  - firebase-auth
+  - firebase-cloud-messaging
+  - apple-app-store-server-api
+  - apple-app-store-connect-api
+  - hubspot
+  - elevenlabs
+  - spren
+  - gentle-forced-alignment
+  - sentry
+  - postgresql
+mitigations: >
+  AUTH (global APP_GUARDs in backend/src/auth/guards): AuthenticateGuard treats the Bearer token first as an
+  opaque LoginSession id (local email/password accounts, which only admins create via POST /admin/users/register) and
+  otherwise as a Firebase ID token checked by firebase-admin verifyIdToken(token, checkRevoked=true). A Firebase
+  user seen for the first time is auto-provisioned as a standard User (firebase/firebase.service.ts). Sign-up is
+  self-service (the iOS app offers Firebase email/password, Sign in with Apple and Google), so "authenticated"
+  means anyone. AuthorizeGuard rejects requests without a user unless the handler or class is @Public().
+  CAVEAT: the Firebase path maps a token to an existing user by uid OR email (getUserByFirebaseUidOrEmail) and does
+  not check email_verified, so admin-only gating may be weaker than it looks (not verified against Firebase project
+  settings).
+
+  ADMIN: AdminGuard is class-level on /admin, admin/circles, admin/promo-codes, admin/quotes and
+  admin/promotion-status. Other admin endpoints use inline `user.role !== 'admin'` checks (other admin/*
+  controllers, session-blueprint read/update/copy, HubSpot admin actions, audio/video export). The
+  x-impersonate-user header works only for admins (impersonation.guard.ts).
+
+  ANY SIGNED-IN APP USER (no admin check) can reach: POST /files (field `data` is base64 OR an http(s) URL that the
+  server downloads with axios into S3, 100 MB cap), /file-folders, POST /s3/upload (multipart through multer, memory
+  storage, no file-size limit), POST /session-blueprints (create; media URLs are downloaded server-side),
+  /claude/chat and /claude/ask (Bedrock passthrough), /speech/* (ElevenLabs), /rephrase, /emotions/resolve,
+  /intentions/resolve, GET /blog/articles, /hubspot/test-contact and /debug-sentry.
+
+  UNAUTHENTICATED (@Public or registered outside Nest guards): POST /auth/login (bcrypt, then Firebase), POST
+  /auth/hash (returns a bcrypt hash of any input), POST /session-blueprints/promote (documented as "Temporarily
+  open (no auth required)": anonymous callers can create or update session drafts, and media URLs in the payload
+  are fetched server-side with axios; only signed-in non-admins are refused), POST /circles/promote and
+  /promotion-status/* (x-promote-api-key shared secret, SHA-256 + timingSafeEqual; an unset key refuses every call),
+  POST /app-store/server-notifications/v2 (the JWS is base64-decoded WITHOUT signature verification; subscription
+  state is then re-fetched from Apple's App Store Server API by transaction id), POST /social-share/render-preview
+  (satori + resvg render of free-text fields with bundled fonts and backgrounds, no remote fetch), GET
+  /social-share/badges/:variant/:id.png, POST /early-access, GET /invite-codes/:code, GET /feelings,
+  /session-modalities, /mobile-app-config, /version, /.well-known/apple-app-site-association, static /public/*
+  (ServeStaticModule), /dashboard/* (res.sendFile; no dashboard build exists in the production image), and Swagger
+  UI at `/` plus /open-api.json (full API schema, always on).
+
+  INPUT: request bodies are parsed before any guard runs. JSON goes through bodyParser.json with a 300mb limit
+  (main.ts); Nest adds its default urlencoded parser (extended, qs). Express 5's default 'simple' query parser is
+  left as is. A global ValidationPipe (whitelist: true, transform: true, forbidNonWhitelisted: false) validates
+  class-validator DTOs. Multer runs only on POST /s3/upload, after the auth guards.
+
+  ABSENT: no rate limiting anywhere (no @nestjs/throttler or express-rate-limit), no helmet or security headers,
+  and no WAF, CDN or load-balancer config in the repo (no IaC). CORS is an allow-list (dashboard.held.app,
+  heldqa-api.arsfutura.co, localhost) with credentials, but requests without an Origin are allowed, so CORS does
+  not limit the iOS app or scripts.
+
+  SECRETS IN THE PROCESS: Firebase service-account key, Apple App Store private key, Bedrock bearer token, HubSpot
+  and ElevenLabs keys, AWS keys (if set) and DATABASE_URL live in env. DATABASE_URL and SENTRY_AUTH_TOKEN are also
+  baked into image layers. Sentry runs with sendDefaultPii: true and 100% tracing. A file-read or env-leak bug
+  exposes production credentials.
+
+  DASHBOARD: static SPA. ProtectedRoute redirects non-admins to /login on the client, and real enforcement is in
+  the API. No dangerouslySetInnerHTML in dashboard/src. Production Postgres is reached by developers only through
+  an SSH tunnel with a read-only user (backend/CLAUDE.md, scripts/query-prod-db.sh).
 notes: >
-  Two lockfiles: backend (NestJS API) and dashboard (admin SPA, React + Vite).
-  OS packages inside the node:22-alpine image are not scanned by the POC.
+  Only backend/package-lock.json runs on a server. dashboard/package-lock.json ships as static browser JS to
+  staff; its axios runs in the browser (XHR/fetch adapter), so Node-side axios or follow-redirects SSRF advisories
+  do not apply there.
+
+  RUNTIME DESPITE THE DEV FLAG: @prisma/client is in devDependencies (lockfile dev=true), yet `prisma generate`
+  (prisma-client-js, output backend/generated/prisma, binaryTargets native + linux-musl) copies its 6.8.2 runtime
+  and the query engine into the generated client, and every DB call goes through it. Treat
+  @prisma/client/@prisma/engines advisories as runtime.
+
+  BUILD TOOLING UNDER backend `dependencies` (so not flagged dev): @nestjs/cli (pulls webpack, @inquirer/prompts,
+  glob 11, typescript), @sentry/cli and the prisma CLI run only in CodeBuild (build, sourcemap upload, generate,
+  migrate deploy). The serving process is `node dist/main` and never invokes them, although `npm prune --prod`
+  leaves them in the image.
+
+  DECLARED BUT NEVER IMPORTED in backend/src: adm-zip, ws (the direct dependency), @sentry/profiling-node and
+  @nestjs/jwt. jsonwebtoken IS used: it is imported directly (a phantom dependency, hoisted from @nestjs/jwt and
+  firebase-admin) to SIGN the App Store Server API and App Store Connect JWTs with Held's own key. firebase-admin
+  also uses it to VERIFY Firebase ID tokens, which happens on every request whose Bearer token is not a session id,
+  so jsonwebtoken verify/decode is reachable unauthenticated.
+
+  QA-ONLY CODE: puppeteer is require()d lazily by the video-export render worker (WORKER_MODE=render-worker),
+  which runs only on the QA host. The production image skips the Chromium download and runs no worker, so
+  puppeteer-core, @puppeteer/browsers, tar-fs and ws are dead code in production. fluent-ffmpeg backs admin-only
+  audio/video export and the admin duration backfill (ffprobe); the production image has no ffmpeg binary.
+
+  FIREBASE: the firebase client SDK is used server-side only for firebase/app + firebase/auth email/password
+  sign-in (POST /auth/login). firebase-admin is used only for auth and messaging. Firestore, Realtime Database,
+  gRPC and protobufjs come in transitively and are never called.
+
+  REACHABLE PARSERS AND RENDERERS: express 5, body-parser (JSON and urlencoded/qs), path-to-regexp routing and
+  class-validator/class-transformer handle every request, including unauthenticated ones. send/serve-static serve
+  public /public/* and /dashboard/*. swagger-ui-express/swagger-ui-dist serve a public Swagger UI at the API root.
+  multer/busboy parse multipart only for signed-in users on POST /s3/upload. axios (with follow-redirects) fetches
+  attacker-supplied URLs (POST /files, POST /session-blueprints, and the anonymous /session-blueprints/promote), so
+  axios and follow-redirects SSRF or redirect advisories are reachable without authentication. satori and
+  @resvg/resvg-js render PNGs on the public render-preview endpoint. sanitize-html is pinned to 2.17.5 on purpose
+  (newer versions need ESM-only htmlparser2 12, which Node 22.10 cannot require(); RELEASE.md) and cleans
+  HubSpot CMS blog HTML authored by staff before it reaches signed-in users.
+
+  DASHBOARD: vite, esbuild and @openapitools/openapi-generator-cli (Java codegen) are build/dev tools. The Vite
+  dev server (allowedHosts: true) never runs in QA or production. react-router 7 is used in declarative
+  BrowserRouter SPA mode (no SSR or framework mode). @base44/sdk is declared but never imported.
+
+  NOT COVERED: OS packages in the Alpine image and the pinned Node 22.10.0 runtime itself (not in any lockfile).
+  The iOS app (held-ios) is the main API client.

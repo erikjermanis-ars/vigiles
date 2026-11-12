@@ -1,15 +1,30 @@
 /**
  * Inbox (spec §12): "what Slack would have received". Ping and digest findings grouped as one
- * message per (project, package), optionally limited to what changed since the previous Refresh all (§4.4).
+ * message per (project, package), optionally limited to what changed since the previous Refresh all (§4.4),
+ * and limited to the dashboard's project scope (see src/lib/project-scope.ts). One summary card per project
+ * in scope says what is open right now.
  * Findings of disabled projects are left out: scan and triage skip them, so they could never be cleared.
  */
-import { and, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../db/client';
 import { advisories, events, findings, jobRuns, projects, triageRuns } from '../db/schema';
+import { messageVolume } from '../eval/metrics';
 import { highestVersion, upgradeTarget } from '../eval/version';
 import { displayVulnId } from '../format';
 import { isMalicious } from '../policy/inputs';
-import { PRIORITIES, TriageOutputSchema, type Action, type Confidence, type EventType, type Priority, type Verdict } from '../types';
+import { ALL_PROJECTS, type ProjectScope } from '../project-scope';
+import {
+  PRIORITIES,
+  TriageOutputSchema,
+  type Action,
+  type Confidence,
+  type Criticality,
+  type EventType,
+  type Exposure,
+  type Priority,
+  type Verdict,
+} from '../types';
+import { openOwnerCasesByProject, projectScanState } from './projects';
 
 /** The fixed remediation for a malicious package (spec §9.1): there is no version to upgrade to. */
 export { MALICIOUS_REMEDIATION } from '../types';
@@ -78,6 +93,31 @@ export interface LastRefresh {
   finishedAt: string | null;
 }
 
+/** One project's state for the Inbox's summary card: what is open right now, whatever the view. */
+export interface InboxProjectCard {
+  id: string;
+  name: string;
+  enabled: boolean;
+  exposure: Exposure | null;
+  criticality: Criticality | null;
+  /** The scan the findings reflect */
+  lastScan: { id: number; ref: string; commitSha: string | null; commitDate: string | null; at: string } | null;
+  /** A newer scan attempt that failed or is still running */
+  scanProblem: { status: 'running' | 'failed'; error: string | null; at: string } | null;
+  /** Current decisions of every open finding of the project (not only this view's), counted as the Inbox groups them */
+  now: {
+    pingMessages: number;
+    pingFindings: number;
+    digestMessages: number;
+    digestFindings: number;
+    logged: number;
+    undecided: number;
+    open: number;
+  };
+  /** Open owner cases (the /decide page) about this project's findings */
+  needsYourCall: number;
+}
+
 export interface InboxData {
   view: InboxView;
   /** The latest succeeded top-level Refresh all */
@@ -104,9 +144,14 @@ export interface InboxData {
   loggedIds: number[];
   /** Totals regardless of view, for empty states (enabled projects only) */
   totals: { findings: number; open: number };
-  /** Disabled projects and their open findings, which the Inbox leaves out */
+  /** Disabled projects (in scope) and their open findings, which the Inbox leaves out */
   disabled: { projectIds: string[]; open: number };
+  /** Enabled projects in scope */
   enabledProjectIds: string[];
+  /** The project scope this Inbox is limited to (null = every project) */
+  scopeIds: string[] | null;
+  /** One card per project in scope: enabled projects, plus disabled ones the scope names explicitly */
+  projects: InboxProjectCard[];
 }
 
 const priorityRank = (p: Priority | null) => (p ? PRIORITIES.indexOf(p) : PRIORITIES.length);
@@ -221,13 +266,79 @@ function changedSinceQuery(db: Db, sinceIso: string) {
     .where(and(inArray(events.type, [...SINCE_EVENT_TYPES]), gt(events.at, sinceIso)));
 }
 
-export function getInbox(db: Db, view: InboxView): InboxData {
+export interface InboxOptions {
+  /** Limit to these projects (the dashboard's scope); null or absent = every project */
+  projectIds?: readonly string[] | null;
+}
+
+/** Summary cards for the projects in scope (enabled ones; a disabled one only when the scope names it). */
+function projectCards(db: Db, scopeIds: readonly string[] | null): InboxProjectCard[] {
+  const rows = db
+    .select({ id: projects.id, name: projects.name, enabled: projects.enabled, profile: projects.profile, lastScanId: projects.lastScanId })
+    .from(projects)
+    .where(scopeIds ? inArray(projects.id, [...scopeIds]) : eq(projects.enabled, true))
+    .orderBy(asc(projects.name))
+    .all();
+  if (!rows.length) return [];
+  const ids = rows.map((r) => r.id);
+  const open = db
+    .select({ projectId: findings.projectId, packageName: findings.packageName, action: findings.currentAction })
+    .from(findings)
+    .where(and(eq(findings.status, 'open'), inArray(findings.projectId, ids)))
+    .all();
+  const volume = new Map(messageVolume(open).map((v) => [v.projectId, v]));
+  const cases = openOwnerCasesByProject(db);
+  return rows.map((r): InboxProjectCard => {
+    const { lastScan, newerAttempt } = projectScanState(db, r);
+    const v = volume.get(r.id);
+    const mine = open.filter((f) => f.projectId === r.id);
+    return {
+      id: r.id,
+      name: r.name,
+      enabled: r.enabled,
+      exposure: r.profile?.exposure ?? null,
+      criticality: r.profile?.criticality ?? null,
+      lastScan: lastScan
+        ? {
+            id: lastScan.id,
+            ref: lastScan.ref,
+            commitSha: lastScan.commitSha,
+            commitDate: lastScan.commitDate,
+            at: lastScan.finishedAt ?? lastScan.startedAt,
+          }
+        : null,
+      scanProblem:
+        newerAttempt && (newerAttempt.status === 'failed' || newerAttempt.status === 'running')
+          ? { status: newerAttempt.status, error: newerAttempt.error, at: newerAttempt.finishedAt ?? newerAttempt.startedAt }
+          : null,
+      now: {
+        pingMessages: v?.pingMessages ?? 0,
+        pingFindings: v?.pingFindings ?? 0,
+        digestMessages: v?.digestMessages ?? 0,
+        digestFindings: v?.digestFindings ?? 0,
+        logged: v?.logFindings ?? 0,
+        undecided: mine.filter((f) => !f.action).length,
+        open: mine.length,
+      },
+      needsYourCall: cases.get(r.id) ?? 0,
+    };
+  });
+}
+
+export function getInbox(db: Db, view: InboxView, opts: InboxOptions = {}): InboxData {
   const anchor = inboxSinceAnchor(db);
   const sinceFallback = view === 'since' && !anchor.sinceAt;
   const since = view === 'since' ? anchor.sinceAt : null;
+  const scopeIds = opts.projectIds ? [...new Set(opts.projectIds)] : null;
+  const inScope = scopeIds ? inArray(findings.projectId, scopeIds) : undefined;
 
   const changedSince = since ? changedSinceQuery(db, since) : null;
-  const projectRows = db.select({ id: projects.id, enabled: projects.enabled }).from(projects).orderBy(projects.id).all();
+  const projectRows = db
+    .select({ id: projects.id, enabled: projects.enabled })
+    .from(projects)
+    .where(scopeIds ? inArray(projects.id, scopeIds) : undefined)
+    .orderBy(projects.id)
+    .all();
   const disabledIds = projectRows.filter((p) => !p.enabled).map((p) => p.id);
   // A finding whose project row is missing is still shown (it cannot be "disabled").
   const enabledProject = or(isNull(projects.id), eq(projects.enabled, true));
@@ -259,7 +370,7 @@ export function getInbox(db: Db, view: InboxView): InboxData {
     .leftJoin(projects, eq(projects.id, findings.projectId))
     .leftJoin(advisories, eq(advisories.osvId, findings.osvId))
     .leftJoin(triageRuns, eq(triageRuns.id, findings.activeTriageRunId))
-    .where(and(eq(findings.status, 'open'), enabledProject, changedSince ? inArray(findings.id, changedSince) : undefined))
+    .where(and(eq(findings.status, 'open'), enabledProject, inScope, changedSince ? inArray(findings.id, changedSince) : undefined))
     .orderBy(findings.id)
     .all();
 
@@ -306,6 +417,7 @@ export function getInbox(db: Db, view: InboxView): InboxData {
     .select({ status: findings.status, enabled: projects.enabled })
     .from(findings)
     .leftJoin(projects, eq(projects.id, findings.projectId))
+    .where(inScope)
     .all();
   const shown = statusRows.filter((r) => r.enabled !== false);
 
@@ -330,17 +442,34 @@ export function getInbox(db: Db, view: InboxView): InboxData {
     totals: { findings: shown.length, open: shown.filter((r) => r.status === 'open').length },
     disabled: { projectIds: disabledIds, open: statusRows.filter((r) => r.enabled === false && r.status === 'open').length },
     enabledProjectIds: projectRows.filter((p) => p.enabled).map((p) => p.id),
+    scopeIds,
+    projects: projectCards(db, scopeIds),
   };
 }
 
 /**
  * The Findings link behind "N findings logged". In the 'since' view it names exactly the changed logged
  * findings (null when there are none); otherwise it lists every open logged finding of the projects shown.
+ * With a `scope`, the link names the scoped projects (Findings would otherwise apply the switcher's cookie,
+ * which a `?project=` override on the Inbox does not change).
  */
-export function loggedFindingsHref(inbox: Pick<InboxData, 'sinceAt' | 'loggedIds' | 'disabled' | 'enabledProjectIds'>): string | null {
-  if (inbox.sinceAt) return inbox.loggedIds.length ? `/findings?action=log&ids=${inbox.loggedIds.join(',')}` : null;
+export function loggedFindingsHref(
+  inbox: Pick<InboxData, 'sinceAt' | 'loggedIds' | 'disabled' | 'enabledProjectIds'>,
+  scope?: ProjectScope,
+): string | null {
+  const scoped = scope?.ids?.length ? scope.ids.join(',') : scope?.source === 'query' ? ALL_PROJECTS : null;
+  if (inbox.sinceAt) {
+    if (!inbox.loggedIds.length) return null;
+    return `/findings?action=log&ids=${inbox.loggedIds.join(',')}${scoped ? `&project=${scoped}` : ''}`;
+  }
   const qs = new URLSearchParams({ action: 'log' });
   // Disabled projects are not in the Inbox; keep them out of the count's link too.
   if (inbox.disabled.open && inbox.enabledProjectIds.length) qs.set('project', inbox.enabledProjectIds.join(','));
+  else if (scoped) qs.set('project', scoped);
   return `/findings?${qs.toString().replaceAll('%2C', ',')}`;
+}
+
+/** The Findings link behind a project card's number: that project's open findings with this current action. */
+export function projectFindingsHref(projectId: string, action: Action | 'none'): string {
+  return `/findings?project=${encodeURIComponent(projectId)}&action=${action}`;
 }

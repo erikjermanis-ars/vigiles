@@ -15,6 +15,13 @@
       "when": 1794348504435,
       "tag": "0001_review_fixes",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794412041839,
+      "tag": "0002_owner_cases",
+      "breakpoints": true
     }
   ]
 }

@@ -11,13 +11,23 @@ osv:
   ecosystems: [] # extra ecosystems to keep fresh; the ones found in lockfiles are always synced
 
 triage:
-  active_config: v2-opus-high-code # drives decisions; exactly one
-  min_priority: P2 # P0..P2 are triaged; P3 is not
+  active_config: v3-opus-high-code # drives decisions; exactly one
+  min_priority: P3 # triage everything: the P3 sweep (2026-11-11) found serious findings that CVSS had rated low; priority only orders the queue
   max_per_run: 25 # cap per triage job (protects subscription usage)
-  concurrency: 2
+  concurrency: 3
   timeout_minutes: 10
   max_budget_usd_per_run: 3 # passed to claude --max-budget-usd (list-price equivalent)
   configs:
+    - name: v3-opus-high-code # prompt v3 = v2 + the owner's own precedents, stricter "latent", trigger verification (2026-11-11)
+      prompt_version: v3
+      model: opus
+      effort: high
+      code_access: true
+    - name: v3-sonnet-high-code
+      prompt_version: v3
+      model: sonnet
+      effort: high
+      code_access: true
     - name: v2-opus-high-code # prompt v2 = v1 + the owner's ping/digest/log rubric (2026-11-11)
       prompt_version: v2
       model: opus

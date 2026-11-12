@@ -1,24 +1,138 @@
-# Project profile (docs/poc-spec.md §14). Disabled until you decide to add it (set enabled: true).
+# Project profile (docs/poc-spec.md §14). Facts below were read from the repo through git (origin/develop @ 93c7a228, tag 1.1.4.284).
 id: held-ios
 name: Held iOS
-enabled: false
+enabled: true
 repo_path: /Users/erikjermanis/work/held-ios
-ref: origin/main # ⚠ origin/HEAD points at develop; main assumed to be the App Store release branch
-fetch_before_scan: true
+# Production is archived from develop: Scripts/archive.sh archives the `held` scheme (ReleaseProd), commits the build bump,
+# tags <marketing>.<build> and pushes the current branch. All 41 1.1.x tags sit on develop's first-parent line, and the develop
+# tip is tag 1.1.4.284 "Release 1.1.4.284 (held, held-staging)". 1.1.3.275..1.1.4.284 are on develop only. origin/main has 3
+# first-parent commits in 19 months (sync merges of develop on 2026-03-24 and 2026-11-03), so it is not the release branch.
+# Package.resolved is identical on both. Two older prod tags were cut off develop on side branches that no longer exist on
+# origin (1.0.7.148, and the hotfix 1.0.12.224 "Fix deeplink host on prod version").
+ref: origin/develop
+fetch_before_scan: true # git fetch origin develop; the scan continues on the existing ref with a warning on failure
 exclude: []
 lockfiles: [held.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved]
 owners: [Erik]
-criticality: medium # ⚠
-exposure: internal # ⚠ a client app: no server exposure; attacker input arrives via the API, deep links and push payloads
-data_classes: [pii, health] # ⚠ heart-rate/HRV via Spren SDK
+# Health and mental-health data (HRV readings, mood, journals, AI-chat check-ins, crisis/emergency prompts) plus PII, for every
+# App Store user. A client compromise exposes that user's signed-in Firebase session, and through it their whole history.
+criticality: high
+# A publicly distributed client. It has no inbound listener, but it runs on users' phones on the open internet and parses
+# input delivered over the internet. Anyone can craft a held:// or https://link.held.app deep link and send it to a user.
+# API JSON, images, Lottie JSON, audio/video and SRT captions arrive over HTTPS from URLs the API returns. Push payloads and
+# API content are first-party (only the backend can send or author them). No web content is rendered.
+exposure: internet-facing
+data_classes: [pii, health, mental-health, credentials]
 runtime:
   language: swift
-  frameworks: [swiftui]
+  swift: '6.0' # SWIFT_VERSION (language mode), held-Shared.xcconfig
+  platform: ios
+  min_ios: '18.0' # target xcconfig held-Shared.xcconfig overrides the project-level 18.4
+  # held-Shared.xcconfig says 1,2, but every `held` target configuration in project.pbxproj sets TARGETED_DEVICE_FAMILY = 1,
+  # which wins. iPads can run it in iPhone compatibility mode. No Mac Catalyst, Mac or visionOS builds.
+  devices: [iphone]
+  package_manager: swiftpm
+  frameworks: [swiftui, swift-composable-architecture-1.26, firebase-ios-sdk-11.15, storekit-2, avfoundation]
 deployments:
   - env: production
-    hosting: App Store
-third_party_services: [firebase, mixpanel, spren] # ⚠
-mitigations: ''
+    hosting: >
+      Apple App Store (app id 6753862783, bundle id app.held, scheme `held`, configuration ReleaseProd). No CI: Scripts/archive.sh
+      is run from develop on a developer Mac and writes the .xcarchive to the Xcode Archives folder. The upload to App Store
+      Connect is then done by hand from Xcode Organizer (archive.sh does no export or upload). The app runs on end users'
+      iPhones. It talks to https://api.held.app (the held-api project, Firebase ID token as Bearer) and to
+      https://prod.api.spren.com (HRV analysis, x-api-key). Universal links on link.held.app (applinks entitlement in
+      held/held-prod.entitlements) and the custom scheme held://. Push via FCM/APNs. Public: anyone can install, and sign-up
+      is open (email/password, Apple or Google via Firebase Auth, no invite code).
+  - env: staging
+    hosting: >
+      Bundle id app.held.staging (scheme `held-staging`, ReleaseStg). It is archived in the same archive.sh runs and, per the
+      README, shipped as TestFlight builds. It talks to https://heldqa-api.arsfutura.co and https://test.api.spren.com, and
+      its universal-link host is heldqa-api.arsfutura.co. Only staging builds show the Debug and Debug UI menus and the
+      staging-only player controls (Env.isStaging).
+third_party_services: [held-api, firebase-auth, firebase-cloud-messaging, firebase-crashlytics, google-sign-in, sign-in-with-apple, mixpanel, sentry, spren, apple-storekit]
+mitigations: >
+  App Transport Security is fully on in shipped builds. held/Info.plist has no NSAppTransportSecurity exceptions, and the
+  "Allow Local Networking" build phase (Scripts/relax-ats-local.sh) adds NSAllowsLocalNetworking only when CONFIGURATION is
+  DebugLocal (the developer-only held-local scheme). All production hosts are HTTPS. There is no certificate pinning: APIClient
+  and the media caches use URLSession with default trust.
+
+  Deep links are allowlisted. DeepLinkHandler.isSupportedURL accepts only the app scheme, or https on DEEPLINK_HOST
+  (link.held.app). parseURL and circleDeepLink map the path to a closed DeepLink enum (check-in, continue-journey?segment_id,
+  sessions/<slug>, circles/<slug>[/live-events/<uuid>], progress, profile, daily-rituals, ritual-session, insights,
+  new-journal-entry, hrv-start-measurement) and drop anything else. A deep link only navigates and passes an id or slug to
+  an authenticated API call. It never loads a URL or web content. The slug is not validated or percent-encoded before
+  it goes into the API path (e.g. GET /circles/by-slug/<slug>, /preview-session/by-slug/<slug>), so a crafted link can
+  change which GET path on api.held.app the app calls with the user's token, but never which host. Google Sign-In OAuth
+  callbacks are consumed first by GIDSignIn.handle (heldApp.handleOpenURL).
+
+  Push taps go through the same path (AppDelegate, then DeepLinkHandler.handleNotification, then
+  DeepLink.from(userInfo:)). Only the backend, which holds the FCM credentials, can send pushes.
+
+  Nothing in held/ uses WKWebView, SFSafariViewController or HTML/attributed-HTML rendering. Fixed external URLs (App Store
+  page, Typeform feedback form, held.app terms/privacy, tel: emergency number) are handed to the system with openURL. The
+  camera QR scanner (AVCaptureMetadataOutput) appears only in the admin-only Preview Session screen, and the scanned text
+  only goes to an authenticated preview-session API call. The app is a single target with no app extensions (no widget,
+  notification-service or share extension).
+
+  Auth: Firebase Auth (email/password, Apple, Google). APIClient adds the Firebase ID token as Bearer on endpoints with
+  auth == .bearer. Authorization is enforced by held-api, not the app. The admin-only "Preview Session" row in ProfileView is
+  a client-side gate on currentUser.isAdmin (role from the API) and grants nothing by itself. DevRootView ships only in
+  #if DEBUG builds.
+
+  Purchases: StoreKit 2. SubscriptionService counts only `.verified` transactions (Transaction.currentEntitlements and
+  Transaction.updates) and ties them to the user with an appAccountToken derived from the user id
+  (SubscriptionService+Ownership). Apple handles payment, and the app never sees card data.
+
+  Remote media (Kingfisher images, Lottie JSON, audio, streamed video via AVURLAsset, SRT captions) is fetched only from
+  URLs inside authenticated API responses, i.e. content Held's own team publishes. LottieCacheService only checks that the
+  body parses as JSON.
+
+  Logging: APIClient logs request headers (including the Bearer token) and bodies through os.Logger at info level. The
+  values are interpolated without a privacy modifier, so they are redacted as <private> in logs collected from release
+  builds. Sentry is on only in the Release configurations (SENTRY_ENABLED = NO in DebugProd and DebugStg).
 notes: >
-  SwiftPM only (Package.resolved, 42 packages). OSV's SwiftURL data is thin (0 findings on 2026-11-10);
-  most iOS risk sits in vendor SDKs, which is the news sweep's territory.
+  Client app: nothing runs on a server. Code that ships in the app runs on users' devices, so map it to runtime_usage
+  `browser` (client-side). Attacker-controlled input is limited to two sources. (1) Deep links and universal links that
+  anyone can send a user, handled by the allowlist above. (2) A network attacker who can get a certificate trusted by the
+  device (there is no pinning). API JSON, push payloads and media URLs are first-party content written by Held's backend and
+  content team. Treat them as trusted unless the held-api project itself is compromised. The app shows no content written
+  by other users: circle reflections are team-authored prompts, live reactions are an enum, and survey comments are the
+  member's own. A crash or DoS that a crafted deep link triggers hits only the user who opens it. A crash from API-served
+  content would hit every user, but only if the backend or its content is compromised.
+
+  Import sites are not computed for Package.resolved. Package to Swift module: kingfisher is Kingfisher; lottie-spm is
+  Lottie; sentry-cocoa is Sentry; mixpanel-swift is Mixpanel; spren-vision-ios is SprenCapture and SprenCore (camera PPG
+  capture for HRV; only SprenCapture is imported); firebase-ios-sdk is FirebaseCore, FirebaseAuth and FirebaseMessaging
+  (FirebaseCrashlytics is linked and starts with FirebaseApp.configure() but is never imported); googlesignin-ios is
+  GoogleSignIn (the GoogleSignInSwift product is linked, the code imports GoogleSignIn; it pulls in appauth-ios, gtmappauth,
+  gtm-session-fetcher and most likely app-check/AppCheckCore). swift-composable-architecture, swift-dependencies,
+  swift-sharing and swiftui-introspect are imported under their own names.
+  Products linked into the app target: ComposableArchitecture, Dependencies, DependenciesMacros, KeychainAccess, Sharing,
+  FirebaseCrashlytics, FirebaseAuth, GoogleSignInSwift, FirebaseMessaging, Kingfisher, SwiftUIIntrospect, Lottie, Sentry,
+  SprenCapture, SprenCore, Mixpanel. KeychainAccess is linked but imported nowhere. It is pinned to branch master (revision
+  e0c7eebc) with no version, so version-range advisories cannot match it.
+
+  Build and tooling only: swiftlintplugins (the SwiftLint binary, run by a build phase on developer Macs), swift-syntax
+  (compiler plugin for the TCA, Dependencies, CasePaths and Perception macros; it runs inside the compiler and never
+  ships), and DependenciesTestSupport (test target only). Resolved but most likely not linked: SwiftPM pins every dependency
+  in firebase-ios-sdk's manifest, but only Auth, Messaging and Crashlytics are used. So grpc-binary, abseil-cpp-binary and
+  leveldb (Firestore/Database), and googleappmeasurement and google-ads-on-device-conversion-ios-sdk (Analytics), are
+  probably not in the binary. The origin of devicekit, json-logic-swift and swift-protobuf is not visible from the repo.
+  None of them is imported by app code.
+
+  open-api.json is a reference copy of the backend's OpenAPI spec. Nothing reads it at build time, and the API client is
+  hand-written (held/Common/Networking/Endpoints). subscriptions.storekit is a local StoreKit test configuration that only
+  the staging and local schemes' Run action uses. Scripts/download-mobile-config.sh fetches BASE_API_URL/mobile-app-config
+  at build time and bundles it. The app also refetches that unauthenticated endpoint at launch and on foreground.
+
+  Data flows worth knowing when judging a leak. SPREN_API_KEY and MIXPANEL_TOKEN are committed in the prod and staging
+  xcconfigs and shipped in Info.plist, the Sentry DSN is hardcoded in heldApp.swift, and the GoogleService-Info plists are
+  committed. All of these can be extracted from the IPA. On failed (non-2xx) API calls, APIClient sends the full URL and
+  the request and response bodies to Sentry, and also sends the error body to Sentry Logs (enableLogs = true). Sentry's
+  user is set to id, email and full name. Mixpanel receives email, first and last name, primary_emotion and subscription status. HRV
+  readings go to Spren with the Firebase uid.
+
+  OSV's SwiftURL advisory coverage is thin. Most iOS risk sits in vendor SDKs (Firebase, Sentry, Mixpanel, Spren, Google
+  Sign-In), whose advisories often appear only in release notes. OS frameworks (ImageIO, AVFoundation, Speech, EventKit)
+  are patched by Apple and are not in the lockfile. origin/chore/update-dependencies (unmerged) moves to the latest major
+  versions (Firebase 13, Sentry 9, GoogleSignIn 10, Mixpanel 7, Spren 3).

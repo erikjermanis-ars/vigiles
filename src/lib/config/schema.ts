@@ -85,6 +85,12 @@ export const PolicyRuleSchema = z.object({
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 
 export const PolicySchema = z.object({
+  /**
+   * Findings of the same advisory in the same project and lockfile (one problem on several packages, e.g. one
+   * Sentry advisory on @sentry/node, @sentry/node-core and @sentry/nestjs) get the most urgent action any of them
+   * received ('max'), so separate LLM runs on one problem never disagree. 'off' decides each finding alone.
+   */
+  same_advisory: z.enum(['max', 'off']).default('max'),
   thresholds: z.object({
     epss_high: z.number().min(0).max(1),
     epss_medium: z.number().min(0).max(1),

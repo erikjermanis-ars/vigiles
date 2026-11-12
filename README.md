@@ -60,9 +60,33 @@ Runtime data (SQLite DB, OSV zips, code snapshots) lives in `~/.vigiles`; set `V
    - **Wrong facts or verdict**: add a new prompt version in `prompts/triage/`, add a config in `config/vigiles.yaml`, and re-triage the labeled findings.
    - **Right facts, wrong action**: edit `config/policy.yaml`, then go to Jobs → **Re-evaluate policy**. This makes no LLM calls.
 
+## Your call (owner decisions)
+
+The **Your call** page asks you only "taste" questions: whether a problem should **ping** (interrupt now), go into **Monday's digest** (fix within 1–2 weeks) or just be **logged**. Whether a problem is real in your app has already been settled by triage and review. Each case is a plain-language brief you can read in under a minute.
+
+Your answer is saved as a label (your labeler) and shows up on Eval. The system's own call and the reason you were asked are revealed only after you answer. Cases are loaded with:
+
+```bash
+npm run cases -- import cases.json   # [{findingId, brief, reason, systemAction?, agentAction?, batch?}]
+npm run cases -- list
+npm run cases -- withdraw <id>|--batch <name>
+```
+
+## Canary (end-to-end check)
+
+`scripts/create-canary.sh` builds a small, deliberately vulnerable Next.js app with two textbook "ping now" problems: a middleware auth bypass and the event-stream malware. `projects/canary.yaml` points at it. After changing prompts or policy, enable it, run the pipeline for it, and check that it pings:
+
+```bash
+scripts/create-canary.sh   # then set enabled: true in projects/canary.yaml
+npm run job -- scan --project canary && npm run job -- enrich && npm run job -- triage --project canary && npm run job -- decide
+```
+
+Set it back to `enabled: false` afterwards so its pings never mix with real projects.
+
 ## Projects
 
 Projects are configured in `projects/<id>.yaml`:
 
-- `how-clutch-web` is enabled.
-- `held-api` and `held-ios` are present but have `enabled: false`. Confirm their ⚠ fields before enabling them.
+- `how-clutch-web`, `held-api` and `held-ios` are enabled.
+- `canary` is a synthetic test project and stays disabled.
+- The header's project switcher scopes the Inbox, Findings, Review and Eval to one project.

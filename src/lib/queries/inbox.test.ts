@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { parsePolicy } from '../config/load';
 import { openDb, type Db } from '../db/client';
-import { events, findings } from '../db/schema';
+import { events, findings, ownerCases, scans } from '../db/schema';
 import { decideAll } from '../policy/decide';
 import { insertConfig, insertEvent, insertFinding, insertJob, insertProject, insertTriageRun, triageOutput } from '../eval/test-fixtures';
 import {
@@ -12,6 +12,7 @@ import {
   inboxSinceAnchor,
   lastSucceededRefreshAll,
   loggedFindingsHref,
+  projectFindingsHref,
   type InboxItem,
 } from './inbox';
 
@@ -472,5 +473,108 @@ rules:
       now: '2026-11-06T00:01:00.000Z',
     });
     expect(getInbox(db, 'since').digest.flatMap((g) => g.items.map((i) => i.findingId))).toEqual([f.id]);
+  });
+});
+
+describe('getInbox with a project scope', () => {
+  const brief = {
+    title: 't',
+    whatItIs: 'w',
+    attackerCouldDo: 'a',
+    whatItTakes: 'w',
+    yourApp: 'y',
+    exploitableToday: 'no' as const,
+    fix: 'f',
+    similarTo: null,
+  };
+
+  function seed() {
+    const db = openDb(':memory:');
+    const web = insertProject(db, 'web', { name: 'Web' });
+    const api = insertProject(db, 'api', { name: 'Api', exposure: 'internal' });
+    const ios = insertProject(db, 'ios', { name: 'Ios', enabled: false });
+    const webPing = insertFinding(db, web.scanId, { projectId: 'web', packageName: 'next', action: 'ping' });
+    insertFinding(db, web.scanId, { projectId: 'web', packageName: 'next', action: 'ping' });
+    insertFinding(db, web.scanId, { projectId: 'web', packageName: 'zod', action: 'log' });
+    const apiDigest = insertFinding(db, api.scanId, { projectId: 'api', packageName: 'qs', action: 'digest' });
+    insertFinding(db, api.scanId, { projectId: 'api', packageName: 'axios', action: 'digest' });
+    insertFinding(db, api.scanId, { projectId: 'api', packageName: 'lodash', action: null });
+    insertFinding(db, api.scanId, { projectId: 'api', packageName: 'qs', action: 'ping', status: 'fixed' });
+    insertFinding(db, ios.scanId, { projectId: 'ios', packageName: 'alamofire', action: 'ping' });
+    db.insert(ownerCases).values({ findingId: apiDigest.id, brief, reason: 'r' }).run();
+    db.insert(ownerCases).values({ findingId: apiDigest.id, brief, reason: 'r', status: 'answered' }).run();
+    db.insert(ownerCases).values({ findingId: webPing.id, brief, reason: 'r', status: 'withdrawn' }).run();
+    return db;
+  }
+
+  it('limits messages, counts and totals to the scoped projects', () => {
+    const db = seed();
+    const api = getInbox(db, 'all', { projectIds: ['api'] });
+    expect(api.scopeIds).toEqual(['api']);
+    expect(api.ping).toEqual([]);
+    expect(api.digest.map((g) => g.packageName).sort()).toEqual(['axios', 'qs']);
+    expect(api.counts).toMatchObject({ pingMessages: 0, digestMessages: 2, digestFindings: 2, logged: 0, undecided: 1 });
+    expect(api.totals).toEqual({ findings: 4, open: 3 });
+    expect(api.disabled).toEqual({ projectIds: [], open: 0 });
+    expect(api.enabledProjectIds).toEqual(['api']);
+
+    const all = getInbox(db, 'all');
+    expect(all.scopeIds).toBeNull();
+    expect(all.ping.map((g) => g.projectId)).toEqual(['web']);
+    expect(all.digest).toHaveLength(2);
+    expect(all.disabled).toEqual({ projectIds: ['ios'], open: 1 });
+  });
+
+  it('has one card per enabled project in scope with what is open right now, whatever the view', () => {
+    const db = seed();
+    const cards = getInbox(db, 'since').projects;
+    // Disabled projects get no card unless the scope names them; cards are in name order.
+    expect(cards.map((c) => c.id)).toEqual(['api', 'web']);
+    const [api, web] = cards;
+    expect(api).toMatchObject({
+      name: 'Api',
+      enabled: true,
+      exposure: 'internal',
+      criticality: 'high',
+      needsYourCall: 1, // only the open case; answered and withdrawn ones do not count
+      scanProblem: null,
+      now: { pingMessages: 0, pingFindings: 0, digestMessages: 2, digestFindings: 2, logged: 0, undecided: 1, open: 3 },
+    });
+    expect(api!.lastScan).toMatchObject({ commitSha: 'abcdef1234567890', ref: 'origin/main' });
+    expect(web).toMatchObject({ needsYourCall: 0, now: { pingMessages: 1, pingFindings: 2, digestMessages: 0, logged: 1, open: 3 } });
+  });
+
+  it('shows a card for a disabled project the scope names, and flags a failed newer scan', () => {
+    const db = seed();
+    db.insert(scans).values({ projectId: 'web', ref: 'origin/main', status: 'failed', error: 'git fetch failed\nmore' }).run();
+    const scoped = getInbox(db, 'all', { projectIds: ['ios', 'web'] });
+    expect(scoped.projects.map((c) => [c.id, c.enabled])).toEqual([
+      ['ios', false],
+      ['web', true],
+    ]);
+    expect(scoped.disabled).toEqual({ projectIds: ['ios'], open: 1 });
+    expect(scoped.ping.map((g) => g.projectId)).toEqual(['web']); // disabled projects still send nothing
+    expect(scoped.projects[1]!.scanProblem).toMatchObject({ status: 'failed', error: 'git fetch failed\nmore' });
+  });
+
+  it('names the scoped projects in the logged link', () => {
+    const db = seed();
+    const api = getInbox(db, 'all', { projectIds: ['api'] });
+    expect(loggedFindingsHref(api, { ids: ['api'], source: 'cookie' })).toBe('/findings?action=log&project=api');
+    const all = getInbox(db, 'all');
+    // Every project via a URL override: say so, or the Findings page would apply the cookie's project.
+    expect(loggedFindingsHref({ ...all, disabled: { projectIds: [], open: 0 } }, { ids: null, source: 'query' })).toBe(
+      '/findings?action=log&project=all',
+    );
+    // Disabled projects are still left out of an all-projects link.
+    expect(loggedFindingsHref(all, { ids: null, source: 'query' })).toBe('/findings?action=log&project=api,web');
+    expect(loggedFindingsHref(all, { ids: null, source: 'default' })).toBe('/findings?action=log&project=api,web');
+    expect(loggedFindingsHref({ sinceAt: 'x', loggedIds: [4, 5], disabled: all.disabled, enabledProjectIds: [] }, { ids: ['web'], source: 'query' })).toBe(
+      '/findings?action=log&ids=4,5&project=web',
+    );
+  });
+
+  it('links a card number to that project’s findings with that action', () => {
+    expect(projectFindingsHref('held-api', 'digest')).toBe('/findings?project=held-api&action=digest');
   });
 });

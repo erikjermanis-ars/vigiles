@@ -35,10 +35,11 @@ export interface ReviewQueue {
 }
 
 /**
- * The labeler's queue. Findings of disabled projects are left out: they are neither scanned nor
- * triaged any more, so their facts and evidence go stale.
+ * The labeler's queue, limited to the dashboard's project scope (`projectIds`; null or absent = every
+ * project). Findings of disabled projects are left out: they are neither scanned nor triaged any more, so
+ * their facts and evidence go stale.
  */
-export function getReviewQueue(db: Db, labeler = LABELER): ReviewQueue {
+export function getReviewQueue(db: Db, labeler = LABELER, opts: { projectIds?: readonly string[] | null } = {}): ReviewQueue {
   const rows = db
     .select({
       id: findings.id,
@@ -56,6 +57,7 @@ export function getReviewQueue(db: Db, labeler = LABELER): ReviewQueue {
       and(
         eq(findings.status, 'open'),
         inArray(findings.priority, [...REVIEW_PRIORITIES]),
+        opts.projectIds ? inArray(findings.projectId, [...opts.projectIds]) : undefined,
         // A finding whose project row is gone counts as enabled, as on the Findings page.
         or(isNull(projects.id), eq(projects.enabled, true)),
       ),

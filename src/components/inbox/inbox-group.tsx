@@ -1,8 +1,10 @@
 /** One would-be Slack message: every ping (or digest) advisory of one package in one project. */
 import Link from 'next/link';
+import { ProjectTag } from '@/components/inbox/project-tag';
 import { VerdictBadge } from '@/components/inbox/verdict-badge';
-import { Card, Mono, PriorityBadge } from '@/components/ui';
+import { Card, Mono, PriorityBadge, cx } from '@/components/ui';
 import { isReleaseVersion, upgradeTarget } from '@/lib/eval/version';
+import type { ProjectColor } from '@/lib/project-scope';
 import { MALICIOUS_REMEDIATION, type InboxGroup } from '@/lib/queries/inbox';
 
 /** The advisory's own fix on the installed release line (spec §12); every release line's fix in the tooltip. */
@@ -39,15 +41,26 @@ function Remediation({ group }: { group: InboxGroup }) {
   );
 }
 
-export function InboxGroupCard({ group }: { group: InboxGroup }) {
+/**
+ * `color` (the project's colour, see projectColors) shows the project as a coloured tag and an accent border, so
+ * messages of different projects are told apart at a glance; without it the project name is plain text.
+ */
+export function InboxGroupCard({ group, color }: { group: InboxGroup; color?: ProjectColor }) {
   const n = group.advisoryCount;
   // Several lockfiles (e.g. backend/ and dashboard/) can each match the same advisory; say which line is which.
   const showLockfile = group.lockfiles.length > 1;
   return (
-    <Card>
+    <Card className={cx(color && cx('border-l-4', color.border))}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 border-b border-border px-4 py-2.5">
         <h3 className="text-sm font-semibold">
-          {group.projectName} · <Mono>{group.packageName}</Mono> — {n} {n === 1 ? 'advisory' : 'advisories'} → <Remediation group={group} />
+          {color ? (
+            <>
+              <ProjectTag name={group.projectName} color={color} className="mr-1 align-[1px]" />{' '}
+            </>
+          ) : (
+            <>{group.projectName} · </>
+          )}
+          <Mono>{group.packageName}</Mono> — {n} {n === 1 ? 'advisory' : 'advisories'} → <Remediation group={group} />
         </h3>
         <span className="text-xs text-muted">installed {group.installedVersions.join(', ') || '—'}</span>
       </div>

@@ -17,6 +17,8 @@ import type {
   EventType,
   FindingInstance,
   FindingOrigin,
+  OwnerBrief,
+  OwnerCaseStatus,
   FindingStatus,
   ImportSite,
   JobStatus,
@@ -285,4 +287,30 @@ export const events = sqliteTable(
     at: text('at').notNull().default(now),
   },
   (t) => [index('events_finding_idx').on(t.findingId), index('events_at_idx').on(t.at)],
+);
+
+/**
+ * Cases the system asks the owner to decide (the /decide page): only "taste" questions, at most a handful,
+ * each with a plain-language brief. Answering writes a label (labeler = answeredBy) for the finding.
+ */
+export const ownerCases = sqliteTable(
+  'owner_cases',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    findingId: integer('finding_id').notNull(),
+    status: text('status').$type<OwnerCaseStatus>().notNull().default('open'),
+    brief: text('brief', { mode: 'json' }).$type<OwnerBrief>().notNull(),
+    /** Why the owner is asked (shown only after answering, so it does not anchor the answer) */
+    reason: text('reason').notNull(),
+    /** The system's current action and the agent labelers' call, revealed after answering */
+    systemAction: text('system_action').$type<Action>(),
+    agentAction: text('agent_action').$type<Action>(),
+    batch: text('batch'),
+    answer: text('answer').$type<Action>(),
+    answeredBy: text('answered_by'),
+    note: text('note'),
+    createdAt: text('created_at').notNull().default(now),
+    answeredAt: text('answered_at'),
+  },
+  (t) => [index('owner_cases_status_idx').on(t.status), index('owner_cases_finding_idx').on(t.findingId)],
 );

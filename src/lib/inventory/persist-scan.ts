@@ -79,10 +79,10 @@ function inventoryKeys(tx: Tx, scanId: number): Set<string> {
 }
 
 function upsertAdvisories(tx: Tx, rows: AdvisoryRow[], now: string): void {
-  const existing = new Map<string, { raw: unknown; cvssScore: number | null }>();
+  const existing = new Map<string, { raw: unknown; cvssScore: number | null; malicious: boolean; cves: string[] }>();
   for (const ids of chunks(rows.map((r) => r.osvId))) {
     const found = tx
-      .select({ osvId: advisories.osvId, raw: advisories.raw, cvssScore: advisories.cvssScore })
+      .select({ osvId: advisories.osvId, raw: advisories.raw, cvssScore: advisories.cvssScore, malicious: advisories.malicious, cves: advisories.cves })
       .from(advisories)
       .where(inArray(advisories.osvId, ids))
       .all();
@@ -90,7 +90,16 @@ function upsertAdvisories(tx: Tx, rows: AdvisoryRow[], now: string): void {
   }
   for (const row of rows) {
     const prev = existing.get(row.osvId);
-    if (prev && prev.cvssScore === (row.cvssScore ?? null) && JSON.stringify(prev.raw) === JSON.stringify(row.raw)) continue;
+    // Skip unchanged rows, but compare the derived fields too: a fix to how they are derived (e.g. recognising
+    // GHSA malware advisories, merging a group's CVEs) must reach rows whose raw record did not change.
+    if (
+      prev &&
+      prev.cvssScore === (row.cvssScore ?? null) &&
+      prev.malicious === (row.malicious ?? false) &&
+      JSON.stringify(prev.cves) === JSON.stringify(row.cves ?? []) &&
+      JSON.stringify(prev.raw) === JSON.stringify(row.raw)
+    )
+      continue;
     const values = { ...row, updatedAt: now };
     tx.insert(advisories).values(values).onConflictDoUpdate({ target: advisories.osvId, set: values }).run();
   }

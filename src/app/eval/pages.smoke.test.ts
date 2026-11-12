@@ -136,6 +136,7 @@ describe('Eval page', () => {
     expect(html).toContain(`${ACTIVE} 1 2 100% (1/1) 100% (1/1) 0% (0/1)`);
     expect(html).toContain('Baseline-origin findings, current decisions');
     expect(html).toContain('Volume per refresh');
-    expect(html).toMatch(new RegExp(`#${ids.latest} \\d+ \\w+ ago 2 \\(2 findings\\) 0 \\(0 findings\\) 1 web 2 / 0`));
+    // Projects are shown by name (insertProject names 'web' "Project web").
+    expect(html).toMatch(new RegExp(`#${ids.latest} \\d+ \\w+ ago 2 \\(2 findings\\) 0 \\(0 findings\\) 1 Project web 2 / 0`));
   });
 });

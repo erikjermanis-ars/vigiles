@@ -7,7 +7,7 @@ import { openDb, type Db } from '../db/client';
 import { advisories, decisions, events, findings, policyVersions, projects, triageConfigs, triageRuns } from '../db/schema';
 import { findingInputHash } from '../triage/state';
 import { ProjectProfileSchema, type Priority, type TriageOutput, type Verdict } from '../types';
-import { decideAll } from './decide';
+import { decideAll, raiseToSameAdvisoryMax } from './decide';
 
 const THRESHOLDS = 'thresholds: { epss_high: 0.5, epss_medium: 0.1, cvss_critical: 9, cvss_high: 7 }';
 
@@ -490,5 +490,34 @@ describe('decideAll', () => {
     const ms = performance.now() - t0;
     expect(stats.evaluated).toBe(1505);
     expect(ms).toBeLessThan(5000);
+  });
+});
+
+describe('raiseToSameAdvisoryMax', () => {
+  const row = (id: number, osvId: string, action: 'ping' | 'digest' | 'log', lockfile = 'backend/package-lock.json', projectId = 'api') => ({
+    id,
+    finding: { projectId, lockfile, osvId },
+    action,
+    ruleId: `r${id}`,
+  });
+  it('raises every finding of one advisory in one lockfile to the most urgent action, with the same-advisory rule', () => {
+    const rows = [row(1, 'GHSA-sentry', 'ping'), row(2, 'GHSA-sentry', 'digest'), row(3, 'GHSA-sentry', 'log'), row(4, 'GHSA-other', 'log')];
+    raiseToSameAdvisoryMax(rows);
+    expect(rows.map((r) => [r.id, r.action, r.ruleId])).toEqual([
+      [1, 'ping', 'r1'],
+      [2, 'ping', 'same-advisory'],
+      [3, 'ping', 'same-advisory'],
+      [4, 'log', 'r4'],
+    ]);
+  });
+  it('keeps different lockfiles and projects apart', () => {
+    const rows = [row(1, 'GHSA-x', 'ping'), row(2, 'GHSA-x', 'log', 'dashboard/package-lock.json'), row(3, 'GHSA-x', 'log', 'backend/package-lock.json', 'web')];
+    raiseToSameAdvisoryMax(rows);
+    expect(rows.map((r) => r.action)).toEqual(['ping', 'log', 'log']);
+  });
+  it('never lowers an action', () => {
+    const rows = [row(1, 'GHSA-y', 'digest'), row(2, 'GHSA-y', 'digest')];
+    raiseToSameAdvisoryMax(rows);
+    expect(rows.map((r) => r.ruleId)).toEqual(['r1', 'r2']);
   });
 });

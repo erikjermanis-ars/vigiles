@@ -1,5 +1,48 @@
 # POC results
 
+## Round 3 (2026-11-11): three projects, owner decisions, final tuning
+
+**Projects.** Profiles were written by agents from each repo's code.
+- held-api: `origin/main`. A NestJS API on ECS plus a static staff SPA, holding health data.
+- held-ios: `origin/develop`, where App Store archives are cut. 41 SwiftPM packages, with no known vulnerabilities in OSV's thin Swift data.
+- how-clutch-web.
+- canary: a synthetic, deliberately vulnerable app, kept disabled.
+
+**Everything is triaged now.** `triage.min_priority` went from P2 to P3: a sweep found real issues among findings rated P3 by CVSS (the Sentry token leak). All 460 open findings in the three real projects have an Opus v3 verdict.
+
+| Project | Ping | Digest (Monday) | Log |
+|---|---|---|---|
+| held-api | **3**: one Sentry SDK issue on three packages. Login tokens, including admin sessions, are copied into Sentry traces. | 12: multer + body-parser DoS reachable by any free account | 327 |
+| how-clutch-web | 0 | 14 | 104 |
+| held-ios | 0 | 0 | 0 |
+
+**Agreement**
+
+| Labels | Policy v3 | LLM suggestion alone |
+|---|---|---|
+| **Owner (Erik), 9 decisions incl. 7 "Your call" cases** | **9 / 9** | 8 / 9 |
+| Agent reviewers acting as the owner (222 P0–P2) | 219 / 222 (99%) | 218 / 222 |
+
+- **Consistency** (20 findings triaged twice with v3): identical suggested action in 20 of 20, identical verdict in 18 of 20.
+- **Canary**: all 9 expected pings fire. That's 4 malware findings, 2 middleware auth bypasses, the RSC RCE, an SSRF and the classic middleware bypass. The Windows-only RCE is logged.
+- The remaining 3 misses are digest-vs-log within packages that already appear in the digest, so no Monday message changes.
+
+**Changes this round**
+
+| Area | Change |
+|---|---|
+| Prompt v3 | The owner's precedents: a latent SSRF goes to digest, and a Windows-only dev-machine flaw goes to log. "Latent" now excludes flaws that need a second, independent bug. A reachable flaw that adds no new capability is log. Verify the advisory's trigger mode, not just the package. |
+| Policy | `same_advisory: max`: one advisory in one lockfile gets one action, however many packages it matches. |
+| Malware | GitHub malware advisories (GHSA + CWE-506, ~450 npm records, including the 2025 account-takeover releases) were not recognised as malicious; now they are. Fixed advisory rows were also not refreshed when only derived fields changed. |
+| Dashboard | A project switcher, per-project cards on the Inbox, and the **Your call** page (plain-language briefs, one decision at a time). |
+| Owner answers | All 7 matched the system. One overrode the agent reviewers (#25: a high-severity issue only probably not exploitable stays in the digest), and that label was corrected. |
+
+**Cost**: $102.73 (list-price equivalent on the subscription) for 850 triage runs across all rounds, including re-runs, consistency samples and experiments. Steady state is only new findings, at about $0.12 each.
+
+**Outside Vigiles' scope**: [held-api-app-findings.md](held-api-app-findings.md) lists application-level issues found while profiling held-api, which no dependency monitor can see.
+
+---
+
 ## Round 2 (2026-11-11): labeled, tuned, re-tested
 
 Labels: 54 P0–P2 findings labeled blind by Claude agents applying the owner's rubric (labeler `agent-rubric`). The rubric:

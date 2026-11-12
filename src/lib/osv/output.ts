@@ -163,8 +163,19 @@ export function cvssVectorOf(record: OsvRecord): string | null {
   return severity.find((s) => s.type === 'CVSS_V4')?.score ?? severity.find((s) => s.type === 'CVSS_V3')?.score ?? null;
 }
 
+/** GitHub's malware advisories (GHSA ids) carry CWE-506 "Embedded Malicious Code" and summaries like these. */
+const MALWARE_SUMMARY = /^(malicious package\b|malware in\b)|\b(is|contains) malware\b/i;
+
+/**
+ * A malicious package (spec §8: always P0, always ping). OSV/OpenSSF use MAL- ids; GitHub publishes the same kind of
+ * advisory under a GHSA id with CWE-506 (e.g. the 2018 event-stream/flatmap-stream backdoor, the 2025 chalk/debug and
+ * color-string account-takeover releases), so both are recognised.
+ */
 export function isMalicious(record: OsvRecord): boolean {
-  return record.id.startsWith('MAL-') || (record.aliases ?? []).some((a) => a.startsWith('MAL-'));
+  if (record.id.startsWith('MAL-') || (record.aliases ?? []).some((a) => a.startsWith('MAL-'))) return true;
+  const cwes = record.database_specific?.cwe_ids;
+  if (Array.isArray(cwes) && cwes.includes('CWE-506')) return true;
+  return MALWARE_SUMMARY.test(record.summary ?? '');
 }
 
 /**

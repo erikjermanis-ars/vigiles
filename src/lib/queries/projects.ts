@@ -1,10 +1,11 @@
 /**
  * Projects page queries (spec §4.4, §7.2, §12): profile, ref → scanned commit, lockfiles,
- * coverage gaps and open-finding counts per project.
+ * coverage gaps and open-finding counts per project, plus the project list behind the header's scope switcher.
  */
 import { and, asc, count, desc, eq } from 'drizzle-orm';
 import type { Db } from '../db/client';
-import { findings, projects, scans } from '../db/schema';
+import { findings, ownerCases, projects, scans } from '../db/schema';
+import type { ScopeProject } from '../project-scope';
 import { ACTIONS, PRIORITIES, type Action, type FindingStatus, type Priority } from '../types';
 
 export type ProjectRow = typeof projects.$inferSelect;
@@ -69,7 +70,8 @@ export interface ProjectScanState {
   newerAttempt: ScanRow | null;
 }
 
-function scanState(db: Db, project: ProjectRow): ProjectScanState {
+/** The scan state of one project (also used by the Inbox's project cards). */
+export function projectScanState(db: Db, project: Pick<ProjectRow, 'id' | 'lastScanId'>): ProjectScanState {
   const byId = project.lastScanId ? db.select().from(scans).where(eq(scans.id, project.lastScanId)).get() : undefined;
   const lastScan =
     byId ??
@@ -88,17 +90,91 @@ function scanState(db: Db, project: ProjectRow): ProjectScanState {
 export interface ProjectOverview extends ProjectScanState {
   project: ProjectRow;
   counts: FindingCounts;
+  /** Open owner cases (the /decide page) about this project's findings */
+  openOwnerCases: number;
+}
+
+/** Open owner cases per project id (cases whose finding is gone are not counted). */
+export function openOwnerCasesByProject(db: Db): Map<string, number> {
+  const rows = db
+    .select({ projectId: findings.projectId, n: count() })
+    .from(ownerCases)
+    .innerJoin(findings, eq(findings.id, ownerCases.findingId))
+    .where(eq(ownerCases.status, 'open'))
+    .groupBy(findings.projectId)
+    .all();
+  return new Map(rows.map((r) => [r.projectId, r.n]));
 }
 
 /** Every project, enabled ones first. */
 export function listProjectsOverview(db: Db): ProjectOverview[] {
   const rows = db.select().from(projects).orderBy(desc(projects.enabled), asc(projects.name)).all();
   const countRows = countRowsByProject(db);
+  const cases = openOwnerCasesByProject(db);
   return rows.map((project) => ({
     project,
-    ...scanState(db, project),
+    ...projectScanState(db, project),
     counts: foldCounts(countRows.filter((r) => r.projectId === project.id)),
+    openOwnerCases: cases.get(project.id) ?? 0,
   }));
+}
+
+/** The header switcher's choices: every project, enabled ones first, then by name. */
+export function listScopeProjects(db: Db): ScopeProject[] {
+  return db
+    .select({ id: projects.id, name: projects.name, enabled: projects.enabled })
+    .from(projects)
+    .orderBy(desc(projects.enabled), asc(projects.name))
+    .all();
+}
+
+export type ProjectHealthTone = 'ok' | 'warn' | 'bad' | 'off';
+
+export interface ProjectHealth {
+  tone: ProjectHealthTone;
+  /** Two or three words, e.g. "Monitored", "Last scan failed" */
+  label: string;
+  /** One plain sentence: what it means and what to do */
+  detail: string;
+}
+
+/**
+ * The one-glance state of a project for the Projects page: disabled, never scanned, its latest scan attempt
+ * failed (findings are from an older scan), a scan running, coverage gaps, or monitored and fine.
+ */
+export function projectHealth(o: Pick<ProjectOverview, 'project' | 'lastScan' | 'newerAttempt'>): ProjectHealth {
+  if (!o.project.enabled) {
+    return {
+      tone: 'off',
+      label: 'Not monitored',
+      detail: `Disabled in projects/${o.project.id}.yaml: scans, triage and the Inbox skip it.`,
+    };
+  }
+  if (o.newerAttempt?.status === 'failed') {
+    return {
+      tone: 'bad',
+      label: 'Last scan failed',
+      detail: o.lastScan
+        ? 'The newest scan failed; findings below are from the previous successful scan.'
+        : 'Every scan so far failed, so nothing is matched yet.',
+    };
+  }
+  if (!o.lastScan) {
+    return o.newerAttempt?.status === 'running'
+      ? { tone: 'warn', label: 'First scan running', detail: 'Findings appear when it finishes.' }
+      : { tone: 'warn', label: 'Never scanned', detail: 'Run Refresh all on the Jobs page to scan it.' };
+  }
+  if (o.newerAttempt?.status === 'running') {
+    return { tone: 'ok', label: 'Scanning', detail: 'A new scan is running; findings below are from the previous one.' };
+  }
+  if (o.lastScan.coverageGaps.length) {
+    return {
+      tone: 'warn',
+      label: 'Monitored, with gaps',
+      detail: 'Some manifests have no lockfile, so their dependencies are not checked.',
+    };
+  }
+  return { tone: 'ok', label: 'Monitored', detail: 'Scanned successfully; every lockfile found is checked.' };
 }
 
 export interface ProjectDetail extends ProjectOverview {
@@ -110,8 +186,9 @@ export function getProjectDetail(db: Db, id: string, scanLimit = 20): ProjectDet
   if (!project) return null;
   return {
     project,
-    ...scanState(db, project),
+    ...projectScanState(db, project),
     counts: foldCounts(countRowsByProject(db, id)),
+    openOwnerCases: openOwnerCasesByProject(db).get(id) ?? 0,
     scans: db.select().from(scans).where(eq(scans.projectId, id)).orderBy(desc(scans.id)).limit(scanLimit).all(),
   };
 }

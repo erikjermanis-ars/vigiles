@@ -1,0 +1,33 @@
+# SYNTHETIC canary project: a deliberately vulnerable app that MUST produce pings (see scripts/create-canary.sh).
+# Use it to verify the whole pipeline end to end after changing prompts or policy:
+#   scripts/create-canary.sh && npm run job -- scan --project canary && npm run job -- enrich \
+#     && npm run job -- triage --project canary && npm run job -- decide
+# Keep `enabled: false` in day-to-day use so its pings never mix with real projects; enable it only for a check.
+id: canary
+name: Canary (synthetic)
+enabled: false
+repo_path: ~/.vigiles/canary/repo
+ref: main
+fetch_before_scan: false
+exclude: []
+lockfiles: [package-lock.json]
+owners: [Erik]
+criticality: high
+exposure: internet-facing
+data_classes: [pii]
+runtime:
+  language: typescript
+  node: '22'
+  frameworks: [nextjs-15, react-19]
+deployments:
+  - env: production
+    hosting: >
+      Self-hosted `next start` (Node 22) on a Linux VM behind nginx, public on the internet. Not on Vercel or any managed
+      platform. nginx proxies every request to Next.js unchanged (no header filtering).
+third_party_services: []
+mitigations: >
+  None beyond the code. /admin and /api/admin are protected only by middleware.ts (session cookie check); the admin page and
+  the admin API route do no auth check of their own. No WAF.
+notes: >
+  Synthetic test project. The admin pages expose every customer's PII. lib/stream-utils.ts uses event-stream on the server
+  (order export job), so whatever event-stream pulls in is installed and runs in production.

@@ -1,9 +1,9 @@
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { openDb } from '../db/client';
-import { projects, scans } from '../db/schema';
+import { ownerCases, projects, scans } from '../db/schema';
 import { insertFinding, insertProject } from '../eval/test-fixtures';
-import { foldCounts, getProjectDetail, listProjectsOverview } from './projects';
+import { foldCounts, getProjectDetail, listProjectsOverview, listScopeProjects, projectHealth, type ProjectOverview } from './projects';
 
 describe('foldCounts', () => {
   it('counts open findings by priority and action, and everything in total', () => {
@@ -43,5 +43,63 @@ describe('project queries', () => {
     expect(detail.scans.map((s) => s.status)).toEqual(['failed', 'succeeded']);
     expect(detail.counts.byPriority.P0).toBe(1);
     expect(getProjectDetail(db, 'missing')).toBeNull();
+  });
+});
+
+describe('scope projects, owner cases and health', () => {
+  const brief = {
+    title: 't',
+    whatItIs: 'w',
+    attackerCouldDo: 'a',
+    whatItTakes: 'w',
+    yourApp: 'y',
+    exploitableToday: 'unclear' as const,
+    fix: 'f',
+    similarTo: null,
+  };
+
+  it('lists the switcher’s projects, enabled ones first, then by name', () => {
+    const db = openDb(':memory:');
+    insertProject(db, 'zeta', { name: 'Zeta' });
+    insertProject(db, 'old', { name: 'Alpha (old)', enabled: false });
+    insertProject(db, 'beta', { name: 'Beta' });
+    db.update(projects).set({ enabled: false }).where(eq(projects.id, 'old')).run();
+    expect(listScopeProjects(db)).toEqual([
+      { id: 'beta', name: 'Beta', enabled: true },
+      { id: 'zeta', name: 'Zeta', enabled: true },
+      { id: 'old', name: 'Alpha (old)', enabled: false },
+    ]);
+  });
+
+  it('counts open owner cases per project', () => {
+    const db = openDb(':memory:');
+    const { scanId } = insertProject(db, 'web');
+    insertProject(db, 'api');
+    const f = insertFinding(db, scanId, { projectId: 'web' });
+    db.insert(ownerCases).values([
+      { findingId: f.id, brief, reason: 'r' },
+      { findingId: f.id, brief, reason: 'r' },
+      { findingId: f.id, brief, reason: 'r', status: 'answered' },
+      { findingId: 9999, brief, reason: 'finding gone' },
+    ]).run();
+    const byId = new Map(listProjectsOverview(db).map((o) => [o.project.id, o.openOwnerCases]));
+    expect(byId).toEqual(new Map([['api', 0], ['web', 2]]));
+    expect(getProjectDetail(db, 'web')!.openOwnerCases).toBe(2);
+  });
+
+  it('says in two words what state a project is in', () => {
+    const db = openDb(':memory:');
+    insertProject(db, 'web');
+    const base = listProjectsOverview(db)[0]!;
+    const scan = base.lastScan!;
+    const at = (o: Partial<ProjectOverview>) => projectHealth({ ...base, ...o });
+    expect(at({}).label).toBe('Monitored');
+    expect(at({ lastScan: { ...scan, coverageGaps: ['supabase/functions/x/deno.json'] } })).toMatchObject({ tone: 'warn', label: 'Monitored, with gaps' });
+    expect(at({ newerAttempt: { ...scan, id: 99, status: 'failed' } })).toMatchObject({ tone: 'bad', label: 'Last scan failed' });
+    expect(at({ newerAttempt: { ...scan, id: 99, status: 'running' } })).toMatchObject({ tone: 'ok', label: 'Scanning' });
+    expect(at({ lastScan: null })).toMatchObject({ tone: 'warn', label: 'Never scanned' });
+    expect(at({ lastScan: null, newerAttempt: { ...scan, status: 'running' } }).label).toBe('First scan running');
+    expect(at({ lastScan: null, newerAttempt: { ...scan, status: 'failed' } }).detail).toContain('Every scan so far failed');
+    expect(at({ project: { ...base.project, enabled: false } })).toMatchObject({ tone: 'off', label: 'Not monitored' });
   });
 });

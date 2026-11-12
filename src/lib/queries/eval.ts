@@ -303,7 +303,12 @@ function decidedFromOkRun(d: Pick<typeof decisions.$inferSelect, 'triageRunId' |
  * finding's inputs changed so its old run no longer matches the current input hash (or the reverse).
  * Comparing only ok runs keeps pending ↔ skipped (which can differ by min_priority) from counting.
  */
-function labeledRows(db: Db, sel: EvalSelection, minPriority: Priority): { rows: LabeledRow[]; configFound: boolean } {
+function labeledRows(
+  db: Db,
+  sel: EvalSelection,
+  minPriority: Priority,
+  scope: ScopeFilter,
+): { rows: LabeledRow[]; configFound: boolean } {
   const config = sel.configName ? db.select().from(triageConfigs).where(eq(triageConfigs.name, sel.configName)).get() : undefined;
   const decisionByFinding = new Map(
     db
@@ -318,7 +323,7 @@ function labeledRows(db: Db, sel: EvalSelection, minPriority: Priority): { rows:
     .from(labels)
     .innerJoin(findings, eq(findings.id, labels.findingId))
     .leftJoin(advisories, eq(advisories.osvId, findings.osvId))
-    .where(eq(labels.labeler, sel.labeler))
+    .where(and(eq(labels.labeler, sel.labeler), inScope(scope)))
     .orderBy(asc(findings.id))
     .all();
 
@@ -406,6 +411,10 @@ function costByConfig(db: Db): (RunStats & { configName: string })[] {
 // Disabled projects are left out of the volume tables, as they are out of the Inbox; a finding whose project
 // row is missing still counts (it cannot be "disabled").
 const enabledProject = or(isNull(projects.id), eq(projects.enabled, true));
+
+/** The dashboard's project scope: the labeled set, volumes and agreement cover only these projects (null = all). */
+type ScopeFilter = readonly string[] | null;
+const inScope = (scope: ScopeFilter) => (scope ? inArray(findings.projectId, [...scope]) : undefined);
 
 // Keeps `IN (...)` lists well under SQLite's bound-parameter limit.
 function chunks<T>(items: readonly T[], size = 500): T[][] {
@@ -500,12 +509,12 @@ function policyActionFor(
   };
 }
 
-function volumes(db: Db, sel: EvalSelection): EvalReport['volume'] {
+function volumes(db: Db, sel: EvalSelection, scope: ScopeFilter): EvalReport['volume'] {
   const open = db
     .select({ projectId: findings.projectId, packageName: findings.packageName, action: findings.currentAction, origin: findings.origin })
     .from(findings)
     .leftJoin(projects, eq(projects.id, findings.projectId))
-    .where(and(eq(findings.status, 'open'), enabledProject))
+    .where(and(eq(findings.status, 'open'), enabledProject, inScope(scope)))
     .all();
   const selected = db
     .select({ projectId: findings.projectId, packageName: findings.packageName, action: decisions.action })
@@ -513,7 +522,13 @@ function volumes(db: Db, sel: EvalSelection): EvalReport['volume'] {
     .innerJoin(findings, eq(findings.id, decisions.findingId))
     .leftJoin(projects, eq(projects.id, findings.projectId))
     .where(
-      and(eq(findings.status, 'open'), enabledProject, eq(decisions.policyHash, sel.policyHash), eq(decisions.configName, sel.configName)),
+      and(
+        eq(findings.status, 'open'),
+        enabledProject,
+        inScope(scope),
+        eq(decisions.policyHash, sel.policyHash),
+        eq(decisions.configName, sel.configName),
+      ),
     )
     .all();
   return {
@@ -521,7 +536,7 @@ function volumes(db: Db, sel: EvalSelection): EvalReport['volume'] {
     baseline: messageVolume(open.filter((r) => r.origin === 'baseline')),
     afterBaseline: messageVolume(open.filter((r) => r.origin !== 'baseline')),
     selected: messageVolume(selected),
-    perRefresh: refreshVolumes(db),
+    perRefresh: refreshVolumes(db, PER_REFRESH_LIMIT, scope),
   };
 }
 
@@ -530,8 +545,9 @@ const isAction = (v: unknown): v is Action => typeof v === 'string' && (ACTIONS 
 /**
  * Per succeeded Refresh all (newest first): the findings whose current decision it set or changed, counted as
  * messages by the action they changed to. A refresh's events are the ones its child jobs wrote (events.job_run_id).
+ * `projectIds` limits it to the dashboard's project scope (null = every project).
  */
-export function refreshVolumes(db: Db, limit = PER_REFRESH_LIMIT): RefreshVolume[] {
+export function refreshVolumes(db: Db, limit = PER_REFRESH_LIMIT, projectIds: readonly string[] | null = null): RefreshVolume[] {
   const refreshes = succeededRefreshAlls(db, limit);
   if (!refreshes.length) return [];
   // Every job of each refresh (children, and their children if any) → that refresh's id.
@@ -572,7 +588,9 @@ export function refreshVolumes(db: Db, limit = PER_REFRESH_LIMIT): RefreshVolume
       .from(events)
       .innerJoin(findings, eq(findings.id, events.findingId))
       .leftJoin(projects, eq(projects.id, findings.projectId))
-      .where(and(inArray(events.type, ['decision_changed', 'created']), inArray(events.jobRunId, chunk), enabledProject))
+      .where(
+        and(inArray(events.type, ['decision_changed', 'created']), inArray(events.jobRunId, chunk), enabledProject, inScope(projectIds)),
+      )
       .orderBy(asc(events.id))
       .all();
     for (const e of rows) {
@@ -606,10 +624,12 @@ export function refreshVolumes(db: Db, limit = PER_REFRESH_LIMIT): RefreshVolume
   });
 }
 
-function agreementWithOthers(db: Db, labeler: string): LabelerComparison[] {
+function agreementWithOthers(db: Db, labeler: string, scope: ScopeFilter): LabelerComparison[] {
   const all = db
     .select({ findingId: labels.findingId, labeler: labels.labeler, action: labels.expectedAction, truth: labels.affectedTruth })
     .from(labels)
+    .innerJoin(findings, eq(findings.id, labels.findingId))
+    .where(inScope(scope))
     .all();
   const mine = new Map(all.filter((l) => l.labeler === labeler).map((l) => [l.findingId, l]));
   const others = [...new Set(all.map((l) => l.labeler))].filter((l) => l !== labeler).sort();
@@ -632,9 +652,15 @@ export function getEvalReport(
     minPriority: Priority;
     /** config/policy.yaml as loaded now; used when the selected hash is the file's (it may not be stored yet) */
     currentPolicy?: LoadedPolicy | null;
+    /**
+     * The dashboard's project scope (null or absent = every project). It limits the labeled set (and so every
+     * metric computed from it), the volume tables and inter-labeler agreement; cost and consistency stay per config.
+     */
+    projectIds?: readonly string[] | null;
   },
 ): EvalReport {
-  const { rows, configFound } = labeledRows(db, sel, opts.minPriority);
+  const scope: ScopeFilter = opts.projectIds ?? null;
+  const { rows, configFound } = labeledRows(db, sel, opts.minPriority, scope);
   const selectedPolicy = loadSelectedPolicy(db, sel.policyHash, opts.currentPolicy);
   const { deciders, cells } = deciderResults(rows, configFound);
   const withoutDecision = rows.filter((r) => r.policy === null);
@@ -669,8 +695,8 @@ export function getEvalReport(
     cost: costByConfig(db),
     consistency: consistencyByConfig(db, selectedPolicy.policy),
     consistencyPolicy: { hash: selectedPolicy.hash, error: selectedPolicy.error },
-    volume: volumes(db, sel),
-    agreement: agreementWithOthers(db, sel.labeler),
+    volume: volumes(db, sel, scope),
+    agreement: agreementWithOthers(db, sel.labeler, scope),
   };
 }
 

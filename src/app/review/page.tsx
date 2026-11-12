@@ -8,11 +8,14 @@ import { humanize, MALICIOUS_REMEDIATION } from '@/components/finding/helpers';
 import { ReviewLabelForm } from '@/components/finding/review-label-form';
 import { ReviewNavKeys } from '@/components/finding/review-nav-keys';
 import { TriageEvidenceView } from '@/components/finding/triage-evidence';
+import { ScopePill } from '@/components/inbox/project-tag';
 import { ActionBadge, Button, ButtonLink, Card, CardBody, CardHeader, Empty, Kv, Mono, PageHeader, PriorityBadge, cx } from '@/components/ui';
+import { currentProjectScope } from '@/app/projects/scope';
 import { saveReviewLabelAction, setLabelerAction } from '@/app/review/actions';
 import { currentLabeler } from '@/app/review/labeler';
 import { getDb } from '@/lib/db/client';
 import { displayVulnId, osvUrl, relativeTime } from '@/lib/format';
+import { scopeIncludes, scopeLabel, withScope, type ProjectScope, type ScopeContext } from '@/lib/project-scope';
 import { loadDecisionContext, type SearchParams } from '@/lib/queries/findings';
 import {
   compareLabel,
@@ -25,7 +28,8 @@ import {
   type ReviewQueue,
 } from '@/lib/queries/review';
 
-const reviewHref = (id: number | null) => (id === null ? null : `/review?id=${id}`);
+/** A queue position; keeps a `?project=` override so the queue stays in the same scope. */
+const reviewHref = (id: number | null, scope: ProjectScope) => (id === null ? null : withScope(`/review?id=${id}`, scope));
 
 /** "Labeling as: [me] Change": the labeler whose queue, labels and reveal this page shows (a cookie). */
 function LabelerControl({ labeler, targetId, error }: { labeler: string; targetId: number | null; error: boolean }) {
@@ -56,13 +60,17 @@ function LabelerControl({ labeler, targetId, error }: { labeler: string; targetI
   );
 }
 
-function Progress({ queue, labeler }: { queue: ReviewQueue; labeler: string }) {
+function Progress({ queue, labeler, scope }: { queue: ReviewQueue; labeler: string; scope: ScopeContext }) {
   const pct = queue.total ? Math.round((queue.labeled / queue.total) * 100) : 0;
   return (
     <div className="mb-5">
-      <div className="mb-1 flex justify-between text-sm">
-        <span>
-          <Mono>{labeler}</Mono> labeled <strong>{queue.labeled}</strong> of {queue.total} open P0–P2 findings (enabled projects)
+      <div className="mb-1 flex flex-wrap justify-between gap-2 text-sm">
+        <span className="inline-flex flex-wrap items-center gap-x-1.5">
+          <ScopePill scope={scope} />
+          <span>
+            <Mono>{labeler}</Mono> labeled <strong>{queue.labeled}</strong> of {queue.total} open P0–P2 findings
+            {scope.ids === null ? ' (enabled projects)' : ''}
+          </span>
         </span>
         <span className="text-muted">{queue.unlabeled.length} to go</span>
       </div>
@@ -180,7 +188,8 @@ function Reveal({ item, nextHref, prevHref }: { item: ReviewItem; nextHref: stri
         {row('LLM verdict vs your "affected"', <VerdictBadge verdict={reveal.verdict} confidence={reveal.confidence} />, cmp.verdict)}
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <ButtonLink href={nextHref} variant="primary">
-            Next
+            {/* The colour sits on a span: globals.css colours <a> outside Tailwind's layers, which beats text-white on the <a>. */}
+            <span className="text-white">Next</span>
           </ButtonLink>
           {prevHref ? <ButtonLink href={prevHref}>Previous</ButtonLink> : null}
           <Link href={`/findings/${item.finding.id}`} className="text-sm">
@@ -202,7 +211,8 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
   const requested = Number(Array.isArray(sp.id) ? sp.id[0] : sp.id);
   const db = getDb();
   const labeler = await currentLabeler();
-  const queue = getReviewQueue(db, labeler);
+  const scope = await currentProjectScope(sp);
+  const queue = getReviewQueue(db, labeler, { projectIds: scope.ids });
   const targetId = pickReviewTarget(queue, Number.isInteger(requested) && requested > 0 ? requested : null);
 
   const header = (
@@ -222,10 +232,14 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
     return (
       <>
         {header}
-        <Progress queue={queue} labeler={labeler} />
+        <Progress queue={queue} labeler={labeler} scope={scope} />
         <Empty>
           {queue.total === 0 ? (
-            'No open P0–P2 findings yet. Run Refresh all on the Jobs page.'
+            scope.ids === null ? (
+              'No open P0–P2 findings yet. Run Refresh all on the Jobs page.'
+            ) : (
+              `No open P0–P2 findings in ${scopeLabel(scope)}. Pick another project in the header, or run Refresh all on the Jobs page.`
+            )
           ) : (
             <>
               Every open P0–P2 finding is labeled. See how the system did on the <Link href="/eval">Eval</Link> page.
@@ -239,14 +253,20 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
   const item = getReviewItem(db, targetId, { activeConfig: loadDecisionContext().activeConfig, labeler });
   if (!item) notFound();
   const { next, prev } = reviewNeighbors(queue, targetId);
-  const nextHref = reviewHref(next);
-  const prevHref = reviewHref(prev);
+  const nextHref = reviewHref(next, scope);
+  const prevHref = reviewHref(prev, scope);
   const position = queue.order.indexOf(targetId);
+  const outsideScope = !scopeIncludes(scope, item.finding.projectId);
 
   return (
     <>
       {header}
-      <Progress queue={queue} labeler={labeler} />
+      <Progress queue={queue} labeler={labeler} scope={scope} />
+      {outsideScope ? (
+        <p className="mb-4 rounded-md bg-digest-bg px-3 py-2 text-sm text-digest">
+          This finding belongs to {item.project?.name ?? item.finding.projectId}, outside the project picked in the header ({scopeLabel(scope)}).
+        </p>
+      ) : null}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_24rem]">
         <div className="min-w-0 space-y-4">
           <FindingHeading item={item} />
@@ -307,7 +327,7 @@ export default async function ReviewPage({ searchParams }: { searchParams: Promi
         </div>
         <div className="space-y-4 lg:sticky lg:top-16 lg:self-start">
           {item.label && item.reveal ? (
-            <Reveal item={item} nextHref={nextHref ?? '/review'} prevHref={prevHref} />
+            <Reveal item={item} nextHref={nextHref ?? withScope('/review', scope)} prevHref={prevHref} />
           ) : (
             <Card>
               <CardHeader

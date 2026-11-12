@@ -1,4 +1,5 @@
 /** Evaluation (spec §11.2): how often base priority, the LLM and the policy agree with your labels. */
+import { currentProjectScope } from '@/app/projects/scope';
 import { currentLabeler } from '@/app/review/labeler';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
@@ -7,12 +8,14 @@ import { ConfusionMatrix } from '@/components/eval/confusion-matrix';
 import { EvalPickers } from '@/components/eval/eval-pickers';
 import { LabeledRowsTable } from '@/components/eval/labeled-rows-table';
 import { RatioValue, Target } from '@/components/eval/ratio-value';
+import { ProjectTag, ScopePill } from '@/components/inbox/project-tag';
 import { RunJobForm } from '@/components/jobs/run-job-form';
 import { ActionBadge, Card, CardBody, CardHeader, Empty, Mono, PageHeader, Table, Td, Th } from '@/components/ui';
 import { loadVigilesConfig } from '@/lib/config/load';
 import { getDb } from '@/lib/db/client';
 import { TARGETS, type VolumeRow } from '@/lib/eval/metrics';
 import { formatDuration, formatUsd, pct, relativeTime } from '@/lib/format';
+import { colorFor, projectColors, scopeLabel, scopeParam, type ProjectScope, type ScopeContext } from '@/lib/project-scope';
 import { listActiveJobs, workerSeemsDown } from '@/lib/queries/jobs';
 import {
   cellKey,
@@ -41,10 +44,20 @@ function configMinPriority(): Priority {
   }
 }
 
-function evalHref(sel: EvalSelection, cell?: CellKey): string {
+/** An Eval link; a `?project=` override is kept so drill-downs stay in the same project scope. */
+function evalHref(sel: EvalSelection, scope: ProjectScope, cell?: CellKey): string {
   const qs = new URLSearchParams({ config: sel.configName, policy: sel.policyHash, labeler: sel.labeler });
+  const project = scopeParam(scope);
+  if (project) qs.set('project', project);
   if (cell) qs.set('cell', cellKey(cell));
-  return `/eval?${qs.toString()}${cell ? '#cell' : ''}`;
+  return `/eval?${qs.toString().replaceAll('%2C', ',')}${cell ? '#cell' : ''}`;
+}
+
+/** A project's coloured tag in the volume tables. */
+function ProjectCell({ id, scope }: { id: string; scope: ScopeContext }) {
+  const p = scope.projects.find((x) => x.id === id);
+  const colors = projectColors(scope.projects.map((x) => x.id));
+  return <ProjectTag name={p?.name ?? id} color={colorFor(colors, id)} enabled={p?.enabled ?? true} />;
 }
 
 function Section({ title, actions, children }: { title: ReactNode; actions?: ReactNode; children: ReactNode }) {
@@ -166,7 +179,7 @@ function DeciderTable({ report }: { report: EvalReport }) {
   );
 }
 
-function CellList({ report, cell }: { report: EvalReport; cell: CellKey }) {
+function CellList({ report, cell, scope }: { report: EvalReport; cell: CellKey; scope: ProjectScope }) {
   const rows = rowsForCell(report, cell);
   const title = DECIDERS.find((d) => d.name === cell.decider)?.title ?? cell.decider;
   return (
@@ -179,7 +192,7 @@ function CellList({ report, cell }: { report: EvalReport; cell: CellKey }) {
           </span>
         }
         actions={
-          <Link href={evalHref(report.selection)} className="text-xs">
+          <Link href={evalHref(report.selection, scope)} className="text-xs">
             close
           </Link>
         }
@@ -204,7 +217,15 @@ function VolumeCell({ row, action }: { row: VolumeRow | undefined; action: Exclu
   );
 }
 
-function VolumeTable({ volume, selectedIsCurrent }: { volume: EvalReport['volume']; selectedIsCurrent: boolean }) {
+function VolumeTable({
+  volume,
+  selectedIsCurrent,
+  scope,
+}: {
+  volume: EvalReport['volume'];
+  selectedIsCurrent: boolean;
+  scope: ScopeContext;
+}) {
   const projectIds = [...new Set([...volume.current, ...volume.selected].map((r) => r.projectId))].sort();
   if (!projectIds.length) return <CardBody className="text-sm text-muted">No open findings.</CardBody>;
   const find = (rows: VolumeRow[], id: string) => rows.find((r) => r.projectId === id);
@@ -233,7 +254,9 @@ function VolumeTable({ volume, selectedIsCurrent }: { volume: EvalReport['volume
           const sel = find(volume.selected, id);
           return (
             <tr key={id}>
-              <Td>{id}</Td>
+              <Td>
+                <ProjectCell id={id} scope={scope} />
+              </Td>
               <Td>
                 <VolumeCell row={cur} action="ping" />
               </Td>
@@ -260,7 +283,7 @@ function VolumeTable({ volume, selectedIsCurrent }: { volume: EvalReport['volume
   );
 }
 
-function PerRefreshTable({ refreshes }: { refreshes: RefreshVolume[] }) {
+function PerRefreshTable({ refreshes, scope }: { refreshes: RefreshVolume[]; scope: ScopeContext }) {
   if (!refreshes.length) return <CardBody className="text-sm text-muted">No Refresh all has succeeded yet.</CardBody>;
   return (
     <Table>
@@ -295,8 +318,8 @@ function PerRefreshTable({ refreshes }: { refreshes: RefreshVolume[] }) {
                 r.projects
                   .filter((p) => p.pingMessages || p.digestMessages)
                   .map((p) => (
-                    <span key={p.projectId} className="mr-3 whitespace-nowrap">
-                      {p.projectId}{' '}
+                    <span key={p.projectId} className="mr-3 inline-flex items-center gap-1 whitespace-nowrap">
+                      <ProjectCell id={p.projectId} scope={scope} />
                       <span className="tabular-nums">
                         {p.pingMessages} / {p.digestMessages}
                       </span>
@@ -328,7 +351,8 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
   const options = getEvalOptions(db, policyFile.hash);
   // Default to the labeler picked on the Review page (cookie), so Eval shows "your" labels.
   const sel = resolveSelection({ ...options.defaults, labeler: await currentLabeler() }, sp);
-  const report = getEvalReport(db, sel, { minPriority: configMinPriority(), currentPolicy: policyFile.loaded });
+  const scope = await currentProjectScope(sp);
+  const report = getEvalReport(db, sel, { minPriority: configMinPriority(), currentPolicy: policyFile.loaded, projectIds: scope.ids });
   const cell = parseCellKey(sp.cell);
   const activeConfig = options.configs.find((c) => c.active)?.name;
   const policyIsCurrent = sel.policyHash === policyFile.hash;
@@ -348,6 +372,7 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
         title="Eval"
         subtitle={
           <>
+            <ScopePill scope={scope} className="mr-2 align-middle" />
             {labeled} finding{labeled === 1 ? '' : 's'} labeled by <Mono>{sel.labeler}</Mono> · config <Mono>{sel.configName || '—'}</Mono>{' '}
             · policy <Mono>{sel.policyHash || '—'}</Mono>
             {deciding.length ? (
@@ -377,7 +402,9 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
       {labeled === 0 ? (
         <div className="mb-5">
           <Empty>
-            No labels from <Mono>{sel.labeler}</Mono> yet. Label findings on the <Link href="/review">Review</Link> page, then come back.
+            No labels from <Mono>{sel.labeler}</Mono>
+            {scope.ids === null ? '' : ` on ${scopeLabel(scope)}`} yet. Label findings on the <Link href="/review">Review</Link> page, then come
+            back.
           </Empty>
         </div>
       ) : (
@@ -402,14 +429,14 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
                   key={d.name}
                   title={`${d.title} (n = ${d.metrics.n})`}
                   matrix={d.metrics.matrix}
-                  cellHref={(label, decided) => evalHref(sel, { decider: d.name, label, decided })}
+                  cellHref={(label, decided) => evalHref(sel, scope, { decider: d.name, label, decided })}
                   selected={cell?.decider === d.name ? cell : null}
                 />
               ))}
             </CardBody>
           </Section>
 
-          {cell ? <CellList report={report} cell={cell} /> : null}
+          {cell ? <CellList report={report} cell={cell} scope={scope} /> : null}
 
           <Section title="Verdict accuracy (LLM verdict vs. your affected answer)">
             <CardBody className="text-sm">
@@ -436,7 +463,9 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
       <Section
         title="Cost and time per triage config"
         actions={
-          <span className="text-xs text-muted">all runs, including failed attempts; cancelled runs only count in runs and total cost</span>
+          <span className="text-xs text-muted">
+            all projects; all runs, including failed attempts; cancelled runs only count in runs and total cost
+          </span>
         }
       >
         {report.cost.length ? (
@@ -487,7 +516,7 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
         }
         actions={
           <span className="text-xs text-muted">
-            findings with ≥ 2 ok runs for the same config and input hash; each run put through policy{' '}
+            all projects; findings with ≥ 2 ok runs for the same config and input hash; each run put through policy{' '}
             <Mono>{report.consistencyPolicy.hash || '—'}</Mono>
           </span>
         }
@@ -554,7 +583,7 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
           </span>
         }
       >
-        <VolumeTable volume={report.volume} selectedIsCurrent={selectedIsCurrent} />
+        <VolumeTable volume={report.volume} selectedIsCurrent={selectedIsCurrent} scope={scope} />
       </Section>
 
       <Section
@@ -565,7 +594,7 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
           </span>
         }
       >
-        <PerRefreshTable refreshes={report.volume.perRefresh} />
+        <PerRefreshTable refreshes={report.volume.perRefresh} scope={scope} />
       </Section>
 
       {options.labelerCount > 1 ? (
@@ -591,7 +620,7 @@ export default async function EvalPage({ searchParams }: { searchParams: Promise
                 {report.agreement.map((a) => (
                   <tr key={a.other}>
                     <Td>
-                      <Link href={evalHref({ ...sel, labeler: a.other })}>{a.other}</Link>
+                      <Link href={evalHref({ ...sel, labeler: a.other }, scope)}>{a.other}</Link>
                     </Td>
                     <Td className="tabular-nums">{a.action.n}</Td>
                     <Td>

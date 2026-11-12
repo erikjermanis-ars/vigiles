@@ -347,6 +347,65 @@ rules:
   });
 });
 
+describe('eval report limited to a project scope', () => {
+  it('scores, counts and compares only the scoped projects’ labeled findings; cost stays per config', () => {
+    const db = openDb(':memory:');
+    const web = insertProject(db, 'web').scanId;
+    const api = insertProject(db, 'api').scanId;
+    const cfg = insertConfig(db, 'cfg-a', true);
+    const w1 = insertFinding(db, web, { projectId: 'web', packageName: 'next', priority: 'P1', action: 'ping' });
+    const w2 = insertFinding(db, web, { projectId: 'web', packageName: 'zod', priority: 'P2', action: 'digest' });
+    const a1 = insertFinding(db, api, { projectId: 'api', packageName: 'qs', priority: 'P1', action: 'ping' });
+    insertFinding(db, api, { projectId: 'api', packageName: 'ky', priority: 'P3', action: 'log' });
+    insertTriageRun(db, a1.id, cfg, { costUsd: 4 });
+    insertTriageRun(db, w1.id, cfg, { costUsd: 1 });
+    for (const f of [w1, w2, a1]) insertDecision(db, f.id, 'pol', 'cfg-a', f.currentAction!);
+    insertLabel(db, w1.id, 'ping', { truth: 'yes' });
+    insertLabel(db, w2.id, 'log');
+    insertLabel(db, a1.id, 'digest');
+    insertLabel(db, w1.id, 'digest', { labeler: 'bob' });
+    insertLabel(db, a1.id, 'digest', { labeler: 'bob' });
+
+    const run = (projectIds?: string[] | null) =>
+      getEvalReport(db, { configName: 'cfg-a', policyHash: 'pol', labeler: 'me' }, { minPriority: 'P2', projectIds });
+    const all = run();
+    expect(all.rows.map((r) => r.findingId)).toEqual([w1.id, w2.id, a1.id]);
+    expect(all.volume.current.map((v) => v.projectId)).toEqual(['api', 'web']);
+    expect(all.agreement[0]!.action.n).toBe(2);
+
+    const apiOnly = run(['api']);
+    expect(apiOnly.rows.map((r) => r.findingId)).toEqual([a1.id]);
+    expect(apiOnly.deciders.find((d) => d.name === 'policy')!.metrics.n).toBe(1);
+    expect(apiOnly.disagreements.map((r) => r.findingId)).toEqual([a1.id]);
+    expect(apiOnly.volume.current).toEqual([
+      { projectId: 'api', pingMessages: 1, pingFindings: 1, digestMessages: 0, digestFindings: 0, logFindings: 1 },
+    ]);
+    expect(apiOnly.volume.selected.map((v) => v.projectId)).toEqual(['api']);
+    expect(apiOnly.agreement).toEqual([expect.objectContaining({ other: 'bob', action: expect.objectContaining({ n: 1 }) })]);
+    // Triage cost is per config, across every project.
+    expect(apiOnly.cost).toEqual(all.cost);
+    expect(apiOnly.cost[0]!.costUsd.total).toBe(5);
+
+    expect(run(['web']).rows.map((r) => r.findingId)).toEqual([w1.id, w2.id]);
+  });
+
+  it('limits the per-refresh volume to the scope', () => {
+    const db = openDb(':memory:');
+    const web = insertProject(db, 'web').scanId;
+    const api = insertProject(db, 'api').scanId;
+    const w = insertFinding(db, web, { projectId: 'web', packageName: 'next', action: 'ping' });
+    const a = insertFinding(db, api, { projectId: 'api', packageName: 'qs', action: 'digest' });
+    const refresh = insertJob(db, { type: 'refresh-all', status: 'succeeded', finishedAt: '2026-11-01T00:10:00.000Z' });
+    const decide = insertJob(db, { type: 'decide', parentId: refresh });
+    insertEvent(db, w.id, 'decision_changed', '2026-11-01T00:05:00.000Z', { jobRunId: decide, data: { from: null, to: 'ping' } });
+    insertEvent(db, a.id, 'decision_changed', '2026-11-01T00:05:00.000Z', { jobRunId: decide, data: { from: null, to: 'digest' } });
+    expect(refreshVolumes(db)[0]!.projects.map((p) => p.projectId)).toEqual(['api', 'web']);
+    const [scoped] = refreshVolumes(db, 10, ['web']);
+    expect(scoped!.projects.map((p) => p.projectId)).toEqual(['web']);
+    expect(scoped!.total).toMatchObject({ pingMessages: 1, digestMessages: 0 });
+  });
+});
+
 describe('volume per refresh', () => {
   let db: Db;
   let scanId: number;

@@ -128,6 +128,18 @@ describe('getReviewQueue', () => {
     local.update(projects).set({ enabled: true }).where(eq(projects.id, 'old')).run();
     expect(getReviewQueue(local).order).toEqual([10, 19, 11, 12, 13, 14, 15]);
   });
+
+  it('limits the queue to the project scope', () => {
+    const local = openDb(':memory:');
+    seed(local);
+    local.insert(projects).values({ id: 'api', name: 'Api', repoPath: '/y', ref: 'origin/main', profile: { ...profile, id: 'api' }, profileHash: 'a' }).run();
+    local.insert(findings).values([f({ id: 20, projectId: 'api', packageName: 'qs', priority: 'P1' }), f({ id: 21, projectId: 'api', packageName: 'ky', priority: 'P2' })]).run();
+    local.insert(labels).values({ findingId: 21, labeler: LABELER, expectedAction: 'log' }).run();
+    expect(getReviewQueue(local, LABELER, { projectIds: ['api'] })).toEqual({ order: [20, 21], unlabeled: [20], total: 2, labeled: 1 });
+    expect(getReviewQueue(local, LABELER, { projectIds: ['web'] }).order).toEqual([10, 11, 12, 13, 14, 15]);
+    expect(getReviewQueue(local, LABELER, { projectIds: null }).order).toEqual([10, 11, 20, 12, 13, 14, 15, 21]);
+    expect(getReviewQueue(local, LABELER, { projectIds: ['api', 'web'] }).total).toBe(8);
+  });
 });
 
 describe('navigation', () => {

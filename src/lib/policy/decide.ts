@@ -17,7 +17,7 @@ import { parsePolicy, type LoadedPolicy } from '../config/load';
 import type { Db } from '../db/client';
 import { advisories, decisions, events, findings, policyVersions, projects, triageConfigs } from '../db/schema';
 import { resolveTriageState } from '../triage/state';
-import type { Action, Priority, ProjectProfile } from '../types';
+import type { Action, DecisionInputs, Priority, ProjectProfile } from '../types';
 import { evaluatePolicy, validatePolicyFields } from './engine';
 import { awaitingEnrichment, buildDecisionInputs, isMalicious, priorityUnderPolicy } from './inputs';
 
@@ -96,6 +96,35 @@ function maliciousByOsvId(db: Db, osvIds: string[]): Map<string, { malicious: bo
   return map;
 }
 
+const ACTION_RANK: Record<Action, number> = { log: 0, digest: 1, ping: 2 };
+
+/** Rule id recorded when a finding was raised to match another finding of the same advisory. */
+export const SAME_ADVISORY_RULE = 'same-advisory';
+
+/**
+ * One advisory in one lockfile is one problem, even when it matches several packages: raise every finding in such a
+ * group to the most urgent action of the group (rule id 'same-advisory'). Pure; exported for tests.
+ */
+export function raiseToSameAdvisoryMax<T extends { finding: Pick<FindingRow, 'projectId' | 'lockfile' | 'osvId'>; action: Action; ruleId: string }>(
+  rows: T[],
+): T[] {
+  const best = new Map<string, Action>();
+  const key = (r: T) => `${r.finding.projectId}\0${r.finding.lockfile}\0${r.finding.osvId}`;
+  for (const r of rows) {
+    const k = key(r);
+    const b = best.get(k);
+    if (!b || ACTION_RANK[r.action] > ACTION_RANK[b]) best.set(k, r.action);
+  }
+  for (const r of rows) {
+    const b = best.get(key(r))!;
+    if (ACTION_RANK[b] > ACTION_RANK[r.action]) {
+      r.action = b;
+      r.ruleId = SAME_ADVISORY_RULE;
+    }
+  }
+  return rows;
+}
+
 export function decideAll(db: Db, opts: DecideOptions): DecideStats {
   const target = resolvePolicy(db, opts.currentPolicy, opts.policyHash);
   validatePolicyFields(target.policy);
@@ -150,6 +179,14 @@ export function decideAll(db: Db, opts: DecideOptions): DecideStats {
           .run();
       };
 
+      const evaluated: {
+        finding: FindingRow;
+        action: Action;
+        ruleId: string;
+        inputs: DecisionInputs;
+        triageRunId: number | null;
+      }[] = [];
+
       for (const stored of open) {
         const project = projectRows.get(stored.projectId);
         if (!project) throw new Error(`finding #${stored.id}: project "${stored.projectId}" not found`);
@@ -173,8 +210,12 @@ export function decideAll(db: Db, opts: DecideOptions): DecideStats {
         const inputs = buildDecisionInputs(finding, profile, advisory, triage);
         const { action, ruleId } = evaluatePolicy(target.policy, inputs);
         // The ok run whose verdict was used, or the failed run (so the trace can show the error).
-        const triageRunId = triage.run?.id ?? null;
+        evaluated.push({ finding, action, ruleId, inputs, triageRunId: triage.run?.id ?? null });
+      }
 
+      if (target.policy.same_advisory === 'max') raiseToSameAdvisoryMax(evaluated);
+
+      for (const { finding, action, ruleId, inputs, triageRunId } of evaluated) {
         db.insert(decisions)
           .values({
             findingId: finding.id,

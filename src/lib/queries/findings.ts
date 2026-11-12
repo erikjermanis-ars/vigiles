@@ -205,14 +205,30 @@ function textParam(sp: SearchParams, key: string): string {
   return (first ?? '').trim();
 }
 
+/** Options for the Findings query string: the dashboard's project scope is the project filter's default. */
+export interface FindingQueryOptions {
+  /**
+   * The project filter when the query has no `project` parameter (the header's scope cookie). A `project`
+   * parameter always wins: `project=all` (or an empty value) means every project.
+   */
+  defaultProject?: readonly string[] | null;
+}
+
+/** The `project` filter: the parameter when present ('all' = every project), else the default. */
+function projectFilter(sp: SearchParams, opts: FindingQueryOptions): string[] {
+  if (sp.project === undefined) return [...new Set(opts.defaultProject ?? [])];
+  const values = [...new Set(paramValues(sp, 'project'))];
+  return values.includes('all') ? [] : values;
+}
+
 /** Parses the Findings page query string. Unknown values are ignored; status defaults to open. */
-export function parseFindingFilters(sp: SearchParams): FindingFilters {
+export function parseFindingFilters(sp: SearchParams, opts: FindingQueryOptions = {}): FindingFilters {
   const statusRaw = paramValues(sp, 'status');
   const status = enumValues(sp, 'status', FINDING_STATUSES);
   const direct = paramValues(sp, 'direct')[0];
   const sort = paramValues(sp, 'sort')[0];
   return {
-    project: [...new Set(paramValues(sp, 'project'))],
+    project: projectFilter(sp, opts),
     status: statusRaw.includes('all') ? [] : status.length ? status : ['open'],
     priority: enumValues(sp, 'priority', [...PRIORITIES, 'none'] as const),
     action: enumValues(sp, 'action', [...ACTIONS, 'none'] as const),
@@ -234,14 +250,23 @@ export function parseFindingFilters(sp: SearchParams): FindingFilters {
   };
 }
 
-/** Inverse of parseFindingFilters (defaults omitted), for links that keep the current filters. */
-export function findingFiltersToQuery(f: FindingFilters, overrides: Partial<FindingFilters> = {}): string {
+/**
+ * Inverse of parseFindingFilters (defaults omitted), for links that keep the current filters. With a
+ * `defaultProject`, a project filter equal to it is omitted and an empty one is written as `project=all`, so the
+ * link means the same whatever scope cookie the next request carries.
+ */
+export function findingFiltersToQuery(f: FindingFilters, overrides: Partial<FindingFilters> = {}, opts: FindingQueryOptions = {}): string {
   const m = { ...f, ...overrides };
   const qs = new URLSearchParams();
   const list = (key: string, v: readonly (string | number)[]) => {
     if (v.length) qs.set(key, v.join(','));
   };
-  list('project', m.project);
+  const def = [...new Set(opts.defaultProject ?? [])];
+  const sameAsDefault = m.project.length === def.length && m.project.every((p) => def.includes(p));
+  if (!sameAsDefault) {
+    if (m.project.length) list('project', m.project);
+    else qs.set('project', 'all');
+  }
   if (m.status.length === 0) qs.set('status', 'all');
   else if (!(m.status.length === 1 && m.status[0] === 'open')) list('status', m.status);
   list('priority', m.priority);

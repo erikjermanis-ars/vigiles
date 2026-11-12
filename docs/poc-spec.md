@@ -621,6 +621,11 @@ Where the build differs from or sharpens the sections above:
   - It also gets `--config config/osv-scanner.toml`. Otherwise an `osv-scanner.toml` committed in a target repo can silently ignore advisories (verified: 137 → 136).
   - Lockfiles are passed as `-L :<path>`, so a `:` in a path can't be parsed as a type prefix.
 - **Dashboard hardening**: `src/proxy.ts` returns 403 unless the Host is `127.0.0.1`, `localhost` or `[::1]` (DNS-rebinding guard). Next's own dev-only endpoints run before the proxy, so `npm run build && npm start` is the safer way to run day to day.
+- **Everything is triaged** (`triage.min_priority: P3`). CVSS-based priority only orders the queue: a sweep found serious issues rated P3.
+- **Same advisory, same action**: `same_advisory: max` in `policy.yaml` gives every finding of one advisory in one lockfile the most urgent action any of them received.
+- **Malware**: an advisory is malicious if its id or an alias is `MAL-*`, if it carries CWE-506, or if its summary says it's malware (GitHub's GHSA malware advisories).
+- **Owner decisions**: the **Your call** page (`owner_cases`, `npm run cases`) asks the owner only taste questions, each as a plain-language brief. Answers become labels.
+- **Canary**: `scripts/create-canary.sh` + `projects/canary.yaml` give an end-to-end check that ping-worthy problems ping.
 - **Labels**: the labeler is chosen on the Review page (cookie, default `me`), so a second developer can label without overwriting yours.
 
 ## 17. Out of scope for the POC (and where each goes)

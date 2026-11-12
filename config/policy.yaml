@@ -16,6 +16,11 @@
 # Base priority thresholds (§8): P0 = malicious, or KEV and (internet-facing or high criticality);
 # P1 = KEV, or EPSS >= epss_high, or CVSS >= cvss_critical on an internet-facing asset;
 # P2 = CVSS >= cvss_high, or EPSS >= epss_medium; P3 = everything else.
+# One advisory in one lockfile is one problem even when it matches several packages (e.g. one Sentry advisory on
+# @sentry/node, @sentry/node-core and @sentry/nestjs): all of them get the most urgent action any of them received
+# (rule id `same-advisory`), so separate triage runs on one problem never disagree. Set to `off` to decide each alone.
+same_advisory: max
+
 thresholds:
   epss_high: 0.5
   epss_medium: 0.1

@@ -1,0 +1,96 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "confidence",
+    "runtime_usage",
+    "vulnerable_code_used",
+    "attacker_reachable",
+    "deployment_conditions_met",
+    "summary",
+    "evidence",
+    "exploit_conditions",
+    "remediation",
+    "workaround",
+    "suggested_action",
+    "suggested_action_reason"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["affected", "likely_affected", "likely_not_affected", "not_affected"],
+      "description": "Is this project's production deployment exploitable through this advisory?"
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "How well the decisive facts behind the verdict are verified."
+    },
+    "runtime_usage": {
+      "type": "string",
+      "enum": ["server", "browser", "server_and_browser", "build_or_tooling_only", "not_used", "unknown"],
+      "description": "Question 1: where the package's code executes in production."
+    },
+    "vulnerable_code_used": {
+      "type": "string",
+      "enum": ["yes", "no", "unknown"],
+      "description": "Question 2: is the specific vulnerable function, option or feature used?"
+    },
+    "attacker_reachable": {
+      "type": "string",
+      "enum": ["yes", "no", "unknown"],
+      "description": "Question 3: can attacker-controlled input reach the vulnerable code in production?"
+    },
+    "deployment_conditions_met": {
+      "type": "string",
+      "enum": ["yes", "no", "unknown"],
+      "description": "Question 4: do the advisory's environmental preconditions (OS, hosting, flags, versions) hold?"
+    },
+    "summary": {
+      "type": "string",
+      "description": "2-4 plain-language sentences: the flaw, whether this project is exposed, and the decisive reason."
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Checkable facts. Code facts cite a repo-relative file and a line you actually read.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "note"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Repo-relative path, a searched directory/glob, or (dependency facts) / (project profile) / (advisory)."
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "description": "1-based line number you saw, or null when the fact is not about a single line."
+          },
+          "note": { "type": "string", "description": "What this shows and why it matters." }
+        }
+      }
+    },
+    "exploit_conditions": {
+      "type": "string",
+      "description": "What an attacker needs: access level, entry point, input shape, configuration."
+    },
+    "remediation": {
+      "type": "string",
+      "description": "The concrete fix: package, target version, direct or via which parent, breaking-change risk."
+    },
+    "workaround": {
+      "type": ["string", "null"],
+      "description": "A concrete interim measure, or null if there is none."
+    },
+    "suggested_action": {
+      "type": "string",
+      "enum": ["ping", "digest", "log"],
+      "description": "Your honest recommendation; a policy makes the final decision."
+    },
+    "suggested_action_reason": {
+      "type": "string",
+      "description": "One sentence with the decisive reason for suggested_action."
+    }
+  }
+}

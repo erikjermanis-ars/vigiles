@@ -86,6 +86,33 @@ export const ImportSiteSchema = z.object({
 });
 export type ImportSite = z.infer<typeof ImportSiteSchema>;
 
+/**
+ * A plain-language brief for an owner decision (the /decide page). Written so a non-specialist can decide
+ * ping / digest / log in under a minute; the technical verdict is already settled by triage.
+ */
+export const OwnerBriefSchema = z.object({
+  /** One line, e.g. "Next.js image optimizer: remote code execution (not reachable today)" */
+  title: z.string(),
+  /** What the vulnerability is, in one or two plain sentences */
+  whatItIs: z.string(),
+  /** What an attacker could do if it worked: concrete harm, no jargon */
+  attackerCouldDo: z.string(),
+  /** What it takes: the conditions an attacker needs */
+  whatItTakes: z.string(),
+  /** The state of this application: which conditions hold / don't, as settled by the technical review */
+  yourApp: z.string(),
+  /** Is it exploitable in this app today? Settled fact for the owner, not a question */
+  exploitableToday: z.enum(['yes', 'no', 'unclear']),
+  /** What fixing costs, e.g. "Minor version bump of next (16.2 → 16.4)" */
+  fix: z.string(),
+  /** Optional: how a similar earlier case was decided, so the owner can stay consistent */
+  similarTo: z.string().nullable(),
+});
+export type OwnerBrief = z.infer<typeof OwnerBriefSchema>;
+
+export const OWNER_CASE_STATUSES = ['open', 'answered', 'withdrawn'] as const;
+export type OwnerCaseStatus = (typeof OWNER_CASE_STATUSES)[number];
+
 /** Dependency facts for one installed version of a finding's package (spec §7.3). */
 export const FindingInstanceSchema = z.object({
   version: z.string(),

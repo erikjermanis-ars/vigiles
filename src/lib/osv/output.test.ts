@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   advisoryFromRecord,
+  isMalicious,
   cvssVectorOf,
   fixedVersionsFor,
   parseOsvOutput,
@@ -148,5 +149,25 @@ describe('group alias CVEs', () => {
       'PYSEC-2026-1',
     ]);
     expect(row.cves).toEqual(['CVE-2026-0001', 'CVE-2026-0002']);
+  });
+});
+
+describe('isMalicious (GHSA malware advisories)', () => {
+  const rec = (o: Record<string, unknown>) => ({ id: 'GHSA-xxxx-xxxx-xxxx', modified: '2026-01-01T00:00:00Z', ...o }) as Parameters<typeof isMalicious>[0];
+  it('recognises OSV MAL- ids and aliases', () => {
+    expect(isMalicious(rec({ id: 'MAL-2025-1' }))).toBe(true);
+    expect(isMalicious(rec({ aliases: ['MAL-2025-1'] }))).toBe(true);
+  });
+  it('recognises GitHub malware advisories by CWE-506 (flatmap-stream, color-string 2.1.1)', () => {
+    expect(isMalicious(rec({ summary: 'Critical severity vulnerability that affects event-stream and flatmap-stream', database_specific: { cwe_ids: ['CWE-506'] } }))).toBe(true);
+  });
+  it('recognises malware summaries without a CWE', () => {
+    expect(isMalicious(rec({ summary: 'Malicious Package in requestt' }))).toBe(true);
+    expect(isMalicious(rec({ summary: 'color-string@2.1.1 contains malware after npm account takeover' }))).toBe(true);
+    expect(isMalicious(rec({ summary: 'sqliter is malware' }))).toBe(true);
+  });
+  it('does not flag ordinary vulnerabilities', () => {
+    expect(isMalicious(rec({ summary: 'Prototype pollution in lodash', database_specific: { cwe_ids: ['CWE-1321'] } }))).toBe(false);
+    expect(isMalicious(rec({ summary: 'Scanner fails to detect malware samples in archives' }))).toBe(false);
   });
 });

@@ -15,6 +15,7 @@
     "start": "concurrently -k -n web,worker -c blue,magenta \"next start -H 127.0.0.1 -p 3900\" \"node --import tsx src/worker/index.ts\"",
     "worker": "node --import tsx src/worker/index.ts",
     "job": "node --import tsx src/cli/job.ts",
+    "cases": "node --import tsx src/cli/cases.ts",
     "db:generate": "drizzle-kit generate",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",

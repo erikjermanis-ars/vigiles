@@ -6,7 +6,9 @@ import { Badge, ButtonLink, Card, CardBody, CardHeader, Empty, Mono, PageHeader,
 import { getDb } from '@/lib/db/client';
 import { formatDuration, relativeTime, shortDate } from '@/lib/format';
 import { summarizeStats } from '@/lib/queries/jobs';
-import { getProjectDetail, type ScanRow } from '@/lib/queries/projects';
+import { ProjectTag } from '@/components/inbox/project-tag';
+import { colorFor, projectColors } from '@/lib/project-scope';
+import { getProjectDetail, listScopeProjects, type ScanRow } from '@/lib/queries/projects';
 import { ProjectBadges, ProjectSummary } from '../_components/project-summary';
 
 const scanTone = { running: 'accent', succeeded: 'ok', failed: 'ping' } as const;
@@ -69,9 +71,12 @@ function ScanHistory({ scans }: { scans: ScanRow[] }) {
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const detail = getProjectDetail(getDb(), id);
+  const db = getDb();
+  const detail = getProjectDetail(db, id);
   if (!detail) notFound();
   const { project } = detail;
+  // The same colour as on every other page (colours are assigned over all project ids).
+  const color = colorFor(projectColors(listScopeProjects(db).map((p) => p.id)), project.id);
 
   return (
     <>
@@ -79,6 +84,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         title={project.name}
         subtitle={
           <span className="inline-flex flex-wrap items-center gap-2">
+            <ProjectTag name={project.name} color={color} enabled={project.enabled} />
             <Mono>{project.id}</Mono> <ProjectBadges project={project} />
           </span>
         }

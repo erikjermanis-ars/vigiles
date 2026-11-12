@@ -2,10 +2,13 @@ import Form from 'next/form';
 import Link from 'next/link';
 import { DependencyBadges, ProjectDisabledBadge, VerdictBadge } from '@/components/finding/badges';
 import { formatCvss, formatEpss, truncate } from '@/components/finding/helpers';
+import { ProjectTag, ScopePill } from '@/components/inbox/project-tag';
 import { ActionBadge, Button, ButtonLink, Card, Empty, Mono, PageHeader, PriorityBadge, Table, Td, Th, cx } from '@/components/ui';
+import { currentProjectScope } from '@/app/projects/scope';
 import { getDb } from '@/lib/db/client';
 import { currentLabeler } from '@/app/review/labeler';
 import { displayVulnId, formatDateTime, shortDate } from '@/lib/format';
+import { colorFor, projectColors, type ProjectColor, type ScopeContext } from '@/lib/project-scope';
 import {
   findingFiltersToQuery,
   listFindings,
@@ -13,6 +16,7 @@ import {
   parseFindingFilters,
   type FindingFilters,
   type FindingListRow,
+  type FindingQueryOptions,
   type FindingSort,
   type SearchParams,
 } from '@/lib/queries/findings';
@@ -52,12 +56,23 @@ function FilterSelect({ name, label, options, current }: { name: string; label: 
 
 const boolValue = (v: boolean | null) => (v === null ? '' : v ? 'yes' : 'no');
 
-function Filters({ filters, projects, labeler }: { filters: FindingFilters; projects: Option[]; labeler: string }) {
+function Filters({
+  filters,
+  projects,
+  labeler,
+  queryOpts,
+}: {
+  filters: FindingFilters;
+  projects: Option[];
+  labeler: string;
+  queryOpts: FindingQueryOptions;
+}) {
   const status = filters.status.length === 0 ? 'all' : filters.status.join(',');
   return (
     // Keyed by the query so "Reset" and header links remount the uncontrolled selects with fresh defaults.
-    <Form key={findingFiltersToQuery(filters)} action="/findings" className="mb-4 flex flex-wrap items-end gap-3">
-      <FilterSelect name="project" label="Project" options={[ANY, ...projects]} current={filters.project} />
+    <Form key={findingFiltersToQuery(filters, {}, queryOpts)} action="/findings" className="mb-4 flex flex-wrap items-end gap-3">
+      {/* "all projects" submits project=all, which overrides the header's scope for this list. */}
+      <FilterSelect name="project" label="Project" options={[{ value: 'all', label: 'all projects' }, ...projects]} current={filters.project.length ? filters.project : 'all'} />
       <FilterSelect
         name="status"
         label="Status"
@@ -94,17 +109,34 @@ function Filters({ filters, projects, labeler }: { filters: FindingFilters; proj
         <Button type="submit" variant="primary">
           Apply
         </Button>
-        <ButtonLink href="/findings">Reset</ButtonLink>
+        <ButtonLink href="/findings" title="Clear the filters (the project stays as picked in the header)">
+          Reset
+        </ButtonLink>
       </div>
     </Form>
   );
 }
 
-function SortHeader({ filters, sort, children, className }: { filters: FindingFilters; sort: FindingSort; children: string; className?: string }) {
+function SortHeader({
+  filters,
+  sort,
+  children,
+  className,
+  queryOpts,
+}: {
+  filters: FindingFilters;
+  sort: FindingSort;
+  children: string;
+  className?: string;
+  queryOpts: FindingQueryOptions;
+}) {
   const active = filters.sort === sort;
   return (
     <Th className={className}>
-      <Link href={`/findings${findingFiltersToQuery(filters, { sort })}`} className={cx('no-underline', active ? 'text-text' : 'text-muted')}>
+      <Link
+        href={`/findings${findingFiltersToQuery(filters, { sort }, queryOpts)}`}
+        className={cx('no-underline', active ? 'text-text' : 'text-muted')}
+      >
         {children}
         {active ? ' ↓' : ''}
       </Link>
@@ -112,7 +144,12 @@ function SortHeader({ filters, sort, children, className }: { filters: FindingFi
   );
 }
 
-function Row({ r, labeler }: { r: FindingListRow; labeler: string }) {
+interface ProjectLook {
+  name: string;
+  color: ProjectColor;
+}
+
+function Row({ r, labeler, project }: { r: FindingListRow; labeler: string; project: ProjectLook }) {
   const href = `/findings/${r.id}`;
   return (
     <tr className="hover:bg-panel-2">
@@ -144,8 +181,8 @@ function Row({ r, labeler }: { r: FindingListRow; labeler: string }) {
         ) : null}
       </Td>
       <Td className="text-xs">
-        <div className="font-medium text-text">{r.projectId}</div>
-        <div className="break-all text-muted">{r.lockfile}</div>
+        <ProjectTag name={project.name} color={project.color} />
+        <div className="mt-1 break-all text-muted">{r.lockfile}</div>
         {r.projectEnabled ? null : <ProjectDisabledBadge />}
       </Td>
       <Td>
@@ -170,12 +207,35 @@ function Row({ r, labeler }: { r: FindingListRow; labeler: string }) {
   );
 }
 
+/** What the list shows: the header's scope, unless the project filter (a `project` parameter) overrides it. */
+function ShowingLine({ filters, scope, look }: { filters: FindingFilters; scope: ScopeContext; look: (id: string) => ProjectLook }) {
+  if (!filters.project.length) return <ScopePill scope={{ ...scope, ids: null }} />;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      {filters.project.map((id) => {
+        const p = look(id);
+        const known = scope.projects.find((x) => x.id === id);
+        return <ProjectTag key={id} name={p.name} color={p.color} enabled={known?.enabled ?? true} solid />;
+      })}
+    </span>
+  );
+}
+
 export default async function FindingsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
-  const filters = parseFindingFilters(await searchParams);
+  const sp = await searchParams;
+  const scope = await currentProjectScope(sp);
+  // The header's scope (cookie) is the project filter's default; a `project` parameter (the filter, or a link) wins.
+  // Links are written against the cookie, so "all projects" picked here survives sorting.
+  const queryOpts: FindingQueryOptions = { defaultProject: scope.cookieIds };
+  const filters = parseFindingFilters(sp, queryOpts);
   const db = getDb();
   const labeler = await currentLabeler();
   const list = listFindings(db, filters, undefined, labeler);
-  const projects = listProjectOptions(db).map((p) => ({ value: p.id, label: p.enabled ? p.name : `${p.name} (disabled)` }));
+  const projectOptions = listProjectOptions(db);
+  const projects = projectOptions.map((p) => ({ value: p.id, label: p.enabled ? p.name : `${p.name} (disabled)` }));
+  const colors = projectColors(scope.projects.map((p) => p.id));
+  const names = new Map(projectOptions.map((p) => [p.id, p.name]));
+  const look = (id: string): ProjectLook => ({ name: names.get(id) ?? id, color: colorFor(colors, id) });
 
   const count =
     list.total > list.rows.length
@@ -188,8 +248,16 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
 
   return (
     <>
-      <PageHeader title="Findings" subtitle={count + (linkOnly.length ? ` · also filtered by ${linkOnly.join(' and ')}` : '')} />
-      <Filters filters={filters} projects={projects} labeler={labeler} />
+      <PageHeader
+        title="Findings"
+        subtitle={
+          <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+            <ShowingLine filters={filters} scope={scope} look={look} />
+            <span>{count + (linkOnly.length ? ` · also filtered by ${linkOnly.join(' and ')}` : '')}</span>
+          </span>
+        }
+      />
+      <Filters filters={filters} projects={projects} labeler={labeler} queryOpts={queryOpts} />
       {list.rows.length === 0 ? (
         <Empty>No findings match these filters. If nothing has been scanned yet, run Refresh all on the Jobs page.</Empty>
       ) : (
@@ -197,32 +265,32 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
           <Table>
             <thead>
               <tr>
-                <SortHeader filters={filters} sort="priority">
+                <SortHeader filters={filters} sort="priority" queryOpts={queryOpts}>
                   Priority
                 </SortHeader>
                 <Th>Action</Th>
-                <SortHeader filters={filters} sort="package">
+                <SortHeader filters={filters} sort="package" queryOpts={queryOpts}>
                   Package
                 </SortHeader>
                 <Th>Vulnerability</Th>
                 <Th>Project · lockfile</Th>
                 <Th>Facts</Th>
-                <SortHeader filters={filters} sort="epss">
+                <SortHeader filters={filters} sort="epss" queryOpts={queryOpts}>
                   EPSS
                 </SortHeader>
-                <SortHeader filters={filters} sort="cvss">
+                <SortHeader filters={filters} sort="cvss" queryOpts={queryOpts}>
                   CVSS
                 </SortHeader>
                 <Th>Verdict</Th>
                 <Th title={`Labeled by ${labeler}`}>Lbl</Th>
-                <SortHeader filters={filters} sort="firstSeen">
+                <SortHeader filters={filters} sort="firstSeen" queryOpts={queryOpts}>
                   First seen
                 </SortHeader>
               </tr>
             </thead>
             <tbody>
               {list.rows.map((r) => (
-                <Row key={r.id} r={r} labeler={labeler} />
+                <Row key={r.id} r={r} labeler={labeler} project={look(r.projectId)} />
               ))}
             </tbody>
           </Table>

@@ -261,6 +261,31 @@ describe('parseFindingFilters', () => {
     expect(findingFiltersToQuery(parseFindingFilters({}))).toBe('');
     expect(findingFiltersToQuery(parseFindingFilters({}), { sort: 'package' })).toBe('?sort=package');
   });
+
+  it('defaults the project filter to the header scope, which a project parameter overrides', () => {
+    const scoped = { defaultProject: ['held-api'] };
+    expect(parseFindingFilters({}, scoped).project).toEqual(['held-api']);
+    expect(parseFindingFilters({ project: 'held-ios' }, scoped).project).toEqual(['held-ios']);
+    // "all projects" in the filter (or an empty value) overrides the scope for this list
+    expect(parseFindingFilters({ project: 'all' }, scoped).project).toEqual([]);
+    expect(parseFindingFilters({ project: '' }, scoped).project).toEqual([]);
+    expect(parseFindingFilters({ project: 'all' }).project).toEqual([]);
+    expect(parseFindingFilters({}, { defaultProject: null }).project).toEqual([]);
+  });
+
+  it('writes links that mean the same whatever scope cookie the next request carries', () => {
+    const scoped = { defaultProject: ['held-api'] };
+    const inScope = parseFindingFilters({ action: 'ping' }, scoped);
+    expect(findingFiltersToQuery(inScope, {}, scoped)).toBe('?action=ping');
+    const everything = parseFindingFilters({ project: 'all', action: 'ping' }, scoped);
+    expect(findingFiltersToQuery(everything, { sort: 'epss' }, scoped)).toBe('?project=all&action=ping&sort=epss');
+    const other = parseFindingFilters({ project: 'held-ios' }, scoped);
+    expect(findingFiltersToQuery(other, {}, scoped)).toBe('?project=held-ios');
+    for (const f of [inScope, everything, other]) {
+      const back = parseFindingFilters(Object.fromEntries(new URLSearchParams(findingFiltersToQuery(f, {}, scoped).slice(1))), scoped);
+      expect(back).toEqual(f);
+    }
+  });
 });
 
 describe('listFindings', () => {
