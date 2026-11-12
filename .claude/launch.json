@@ -4,8 +4,29 @@
     {
       "name": "vigiles-web",
       "runtimeExecutable": "/Users/erikjermanis/.nvm/versions/node/v24.18.1/bin/node",
-      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "-H", "127.0.0.1", "-p", "3900"],
+      "runtimeArgs": [
+        "node_modules/next/dist/bin/next",
+        "dev",
+        "-H",
+        "127.0.0.1",
+        "-p",
+        "3900"
+      ],
       "port": 3900
+    },
+    {
+      "name": "deck",
+      "runtimeExecutable": "/usr/bin/python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "3950",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "docs"
+      ],
+      "port": 3950
     }
   ]
 }
