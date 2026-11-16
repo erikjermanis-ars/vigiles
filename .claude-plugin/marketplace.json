@@ -1,0 +1,14 @@
+{
+  "name": "vigiles",
+  "description": "Vigiles: dependency vulnerability audits triaged against your code.",
+  "owner": {
+    "name": "Erik Jermanis"
+  },
+  "plugins": [
+    {
+      "name": "vigiles",
+      "source": "./plugin",
+      "description": "Audit your repository's dependencies for known vulnerabilities and get only the ones that matter for this project (/vigiles:audit)."
+    }
+  ]
+}

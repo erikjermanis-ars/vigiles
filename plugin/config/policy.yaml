@@ -1,0 +1,97 @@
+# Decision policy (docs/poc-spec.md §8, §10). First matching rule wins.
+# Editing this file creates a new policy version (by content hash); "Re-evaluate policy" applies it
+# to every open finding instantly from stored triage results, with no LLM calls.
+#
+# Condition syntax (all keys must match):
+#   field: value            equality
+#   field: [a, b]           any of
+#   field: { gte: 0.5 }     numeric range (gte, gt, lte, lt); null never matches
+#   not: { ... }            negation of a nested condition
+#   {}                      always matches
+#
+# Fields: priority, malicious, in_kev, epss, cvss, exposure, criticality, direct, dev_only,
+#   fix_available, triage_status (ok|failed|pending|skipped), verdict, confidence, runtime_usage,
+#   vulnerable_code_used, attacker_reachable, deployment_conditions_met, suggested_action
+
+# Base priority thresholds (§8): P0 = malicious, or KEV and (internet-facing or high criticality);
+# P1 = KEV, or EPSS >= epss_high, or CVSS >= cvss_critical on an internet-facing asset;
+# P2 = CVSS >= cvss_high, or EPSS >= epss_medium; P3 = everything else.
+# One advisory in one lockfile is one problem even when it matches several packages (e.g. one Sentry advisory on
+# @sentry/node, @sentry/node-core and @sentry/nestjs): all of them get the most urgent action any of them received
+# (rule id `same-advisory`), so separate triage runs on one problem never disagree. Set to `off` to decide each alone.
+same_advisory: max
+
+thresholds:
+  epss_high: 0.5
+  epss_medium: 0.1
+  cvss_critical: 9.0
+  cvss_high: 7.0
+
+rules:
+  # --- Safety rules: fire before any LLM judgement is trusted ---
+  - id: malicious
+    when: { malicious: true }
+    then: ping
+    note: A malicious package in the lockfile means a compromised install. Always urgent.
+
+  - id: no-verdict-urgent
+    when: { priority: [P0, P1], triage_status: [pending, failed] }
+    then: ping
+    note: Fail loud. Missing or failed triage never hides a P0/P1.
+
+  - id: no-verdict-p2
+    when: { priority: P2, triage_status: [pending, failed] }
+    then: digest
+    note: Untriaged P2s (e.g. beyond triage.max_per_run) stay visible instead of falling through to log.
+
+  - id: p0-unless-clearly-not
+    when: { priority: P0, not: { verdict: not_affected, confidence: high } }
+    then: ping
+    note: P0 = exploited in the wild (KEV) on an exposed asset, or a malicious package. Only a confident "not affected" lowers it.
+
+  - id: p0-not-affected
+    when: { priority: P0 }
+    then: digest
+    note: Never silenced; the reasoning is shown.
+
+  # --- Triaged findings: the LLM applies the owner's rubric (prompt v2 §7); these rules bound it ---
+  - id: llm-ping
+    when: { suggested_action: ping, verdict: [affected, likely_affected] }
+    then: ping
+    note: >
+      Real, quick harm per the rubric, with the verdict backing it (affected or likely affected).
+      Covers the rubric's "unresolved severe reachability → ping". Replaces v1's p1-affected and p2-raise.
+
+  - id: p1-clearly-not-affected
+    when: { priority: P1, verdict: not_affected, confidence: high, suggested_action: log }
+    then: log
+    note: >
+      Added 2026-11-11 after labeling: a P1 that is verifiably not exploitable here (e.g. a Windows-only flaw on
+      Linux hosting, a package only a CLI pulls in) is noise in the digest. Only when all three agree.
+
+  - id: p1-floor
+    when: { priority: P1 }
+    then: digest
+    note: Any other P1 (high CVSS on an internet-facing asset, or high EPSS) is at least reported weekly.
+
+  - id: llm-digest
+    when: { suggested_action: digest }
+    then: digest
+    note: >
+      Added 2026-11-11: the rubric's digest cases include developer-machine risk and latent severe flaws, which the
+      tooling-only rule below used to log. Trust the LLM's digest before falling through.
+
+  - id: tooling-only
+    when:
+      runtime_usage: [build_or_tooling_only, not_used]
+      verdict: [likely_not_affected, not_affected]
+    then: log
+
+  - id: p2-affected
+    when: { priority: P2, verdict: [affected, likely_affected] }
+    then: digest
+    note: Floor for an affected P2 even if the LLM suggested log.
+
+  - id: default
+    when: {}
+    then: log

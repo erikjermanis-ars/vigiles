@@ -14,6 +14,7 @@ import { jobRuns, projects, triageConfigs } from '../lib/db/schema';
 import { describeLiveJob, liveRunningJobs } from '../lib/jobs/queue';
 import type { JobContext, JobHandler } from '../lib/jobs/types';
 import { getClaudeVersion, type ClaudeTriageResult } from '../lib/triage/claude';
+import { MAX_CONSECUTIVE_CLI_FAILURES } from '../lib/triage/concurrency';
 import { loadTriagePrompt } from '../lib/triage/prompt';
 import { forEachConcurrent, memoizedSnapshots, triageFinding } from '../lib/triage/runner';
 import { selectTriageCandidates, type TriageCandidate } from '../lib/triage/select';
@@ -36,13 +37,8 @@ const ParamsSchema = z
   })
   .strict();
 
-/**
- * Findings in a row whose every claude attempt failed at the CLI level (is_error, bad exit, no JSON).
- * That pattern means claude itself is unavailable (usage limit, auth, outage), not that the findings are
- * hard; carrying on would only spend time (and, for the failures that do count, each remaining finding's
- * MAX_ATTEMPTS_PER_HASH retries).
- */
-export const MAX_CONSECUTIVE_CLI_FAILURES = 3;
+// MAX_CONSECUTIVE_CLI_FAILURES: also used by the plugin, so it lives in the DB-free concurrency module.
+export { MAX_CONSECUTIVE_CLI_FAILURES };
 
 type Counts = Record<TriageRunStatus, number>;
 

@@ -2,8 +2,7 @@
 import type { Policy } from '../config/schema';
 import type { advisories, findings } from '../db/schema';
 import { computeBasePriority } from '../signals/priority';
-import type { TriageState } from '../triage/state';
-import type { DecisionInputs, Priority, ProjectProfile } from '../types';
+import type { DecisionInputs, Priority, ProjectProfile, TriageOutput, TriageStatus } from '../types';
 
 type FindingRow = typeof findings.$inferSelect;
 type AdvisoryRow = typeof advisories.$inferSelect;
@@ -61,15 +60,22 @@ export function priorityUnderPolicy(
   ).priority;
 }
 
+/** What buildDecisionInputs reads from a triage state: triage/state's TriageState, or a verdict stored elsewhere (the plugin). */
+export interface DecisionTriage {
+  status: TriageStatus;
+  run: { output: TriageOutput | null } | null;
+}
+
 /**
  * `finding.priority` is used as given: pass the priority under the evaluated policy (priorityUnderPolicy).
  * Triage fields are null unless the triage status is ok, so a failed or stale run can never lend its verdict.
+ * Generic so a caller can pass a fuller run object (e.g. a triage_runs row literal) without excess-property errors.
  */
-export function buildDecisionInputs(
+export function buildDecisionInputs<T extends DecisionTriage>(
   finding: DecisionFinding,
   profile: Pick<ProjectProfile, 'exposure' | 'criticality'>,
   advisory: Pick<AdvisoryRow, 'malicious'> | null | undefined,
-  triage: Pick<TriageState, 'status' | 'run'>,
+  triage: T,
 ): DecisionInputs {
   const output = triage.status === 'ok' ? (triage.run?.output ?? null) : null;
   // An ok run without stored output is unusable; report it as failed so P0/P1 still fail loud.

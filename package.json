@@ -16,12 +16,16 @@
     "worker": "node --import tsx src/worker/index.ts",
     "job": "node --import tsx src/cli/job.ts",
     "cases": "node --import tsx src/cli/cases.ts",
+    "vigiles": "node --import tsx src/plugin/main.ts",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "check:plugin": "node scripts/build-plugin.mjs --check",
     "db:generate": "drizzle-kit generate",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "compare:plugin": "node --import tsx scripts/compare-plugin-with-app.ts"
   },
   "dependencies": {
     "better-sqlite3": "13.0.3",
@@ -43,6 +47,7 @@
     "@types/react-dom": "19.3.0",
     "concurrently": "10.0.6",
     "drizzle-kit": "0.31.11",
+    "esbuild": "0.28.2",
     "oxlint": "1.90.0",
     "postcss": "8.5.32",
     "prettier": "3.9.10",

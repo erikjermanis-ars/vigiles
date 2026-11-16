@@ -16,7 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ensureSnapshot, isScrubbedPath, readSnapshotInfo, scrubSnapshot, snapshotDir } from './index';
+import { ensureSnapshot, gitFetch, isFetchableBranch, isScrubbedPath, readSnapshotInfo, scrubSnapshot, snapshotDir } from './index';
 
 // realpath: macOS tmpdir() is a symlink (/var -> /private/var)
 const tmp = realpathSync(mkdtempSync(path.join(tmpdir(), 'vigiles-git-')));
@@ -143,7 +143,7 @@ describe('ensureSnapshot', () => {
   it('records what it skipped in the marker and logs it', async () => {
     const info = readSnapshotInfo(snapshotDir(snapshots, 'p', sha));
     expect(info).toMatchObject({
-      format: 2,
+      format: 3,
       sha,
       source: 'objects',
       files: 9,
@@ -158,7 +158,7 @@ describe('ensureSnapshot', () => {
     const logs: string[] = [];
     await ensureSnapshot('git', path.join(tmp, 'snapshots-log'), 'p', repo, sha, { log: (m) => logs.push(m) });
     expect(logs).toHaveLength(1);
-    expect(logs[0]).toMatch(/not written: 2 symlink\(s\), 1 submodule\(s\), 5 \.git\/\.claude\/\.env\* path\(s\)/);
+    expect(logs[0]).toMatch(/not written: 2 symlink\(s\), 1 submodule\(s\), 5 \.git\/\.claude\/\.vigiles\/\.env\* path\(s\)/);
   });
 
   it('is cached by sha: a complete snapshot is not rebuilt', async () => {
@@ -293,13 +293,54 @@ describe('ensureSnapshot', () => {
     // symlink targets are untouched
     expect(readFileSync(path.join(outside, '.env'), 'utf8')).toBe('OUTSIDE=1\n');
     expect(existsSync(path.join(outside, 'deep', 'keep.txt'))).toBe(true);
-    expect(readSnapshotInfo(dir)).toEqual({ format: 2, sha, source: 'archive' });
+    expect(readSnapshotInfo(dir)).toEqual({ format: 3, sha, source: 'archive' });
     expect(logs).toEqual([expect.stringMatching(/re-scrubbed a legacy/)]);
 
     // marked: the next call does not scrub again
     writeFileSync(path.join(dir, '.env'), 'late\n');
     await ensureSnapshot('git', root, 'p', repo, sha);
     expect(existsSync(path.join(dir, '.env'))).toBe(true);
+  });
+});
+
+describe('snapshots and .vigiles/', () => {
+  const vrepo = path.join(tmp, 'vigiles-repo');
+  let vsha = '';
+  beforeAll(() => {
+    mkdirSync(path.join(vrepo, '.vigiles'), { recursive: true });
+    git(vrepo, ['init', '-q', '-b', 'main']);
+    writeFileSync(path.join(vrepo, 'index.ts'), 'export {};\n');
+    writeFileSync(path.join(vrepo, '.vigiles', 'verdicts.json'), '{"format":1,"verdicts":[]}\n');
+    writeFileSync(path.join(vrepo, '.vigiles', 'profile.yaml'), 'id: x\n');
+    git(vrepo, ['add', '-A']);
+    git(vrepo, ['commit', '-q', '-m', 'init']);
+    vsha = git(vrepo, ['rev-parse', 'HEAD']);
+  });
+
+  it('leaves a committed .vigiles/ out of new snapshots, without naming it', async () => {
+    const dir = await ensureSnapshot('git', path.join(tmp, 'snapshots-vigiles'), 'p', vrepo, vsha);
+    expect(readdirSync(dir).sort()).toEqual(['.vigiles-snapshot-complete', 'index.ts']);
+    const info = readSnapshotInfo(dir)!;
+    expect(info).toMatchObject({ format: 3, source: 'objects', files: 1, skipped: { scrubbed: 2 } });
+    expect(info.skippedExamples).toBeUndefined();
+  });
+
+  it('re-scrubs a format-2 snapshot that still holds .vigiles/, keeping its info', async () => {
+    const root = path.join(tmp, 'snapshots-format2');
+    const dir = snapshotDir(root, 'p', vsha);
+    mkdirSync(path.join(dir, '.vigiles'), { recursive: true });
+    writeFileSync(path.join(dir, '.vigiles', 'verdicts.json'), '{}\n');
+    writeFileSync(path.join(dir, 'index.ts'), 'export {};\n');
+    const old = { format: 2, sha: vsha, source: 'objects', files: 3, bytes: 40 };
+    writeFileSync(path.join(dir, '.vigiles-snapshot-complete'), `${JSON.stringify(old)}\n`);
+    // Not complete (to readers) until ensureSnapshot upgraded it.
+    expect(readSnapshotInfo(dir)).toBeNull();
+
+    const logs: string[] = [];
+    expect(await ensureSnapshot('git', root, 'p', vrepo, vsha, { log: (m) => logs.push(m) })).toBe(dir);
+    expect(readdirSync(dir).sort()).toEqual(['.vigiles-snapshot-complete', 'index.ts']);
+    expect(readSnapshotInfo(dir)).toEqual({ ...old, format: 3 });
+    expect(logs).toEqual([expect.stringMatching(/re-scrubbed an older \(format 2\) snapshot/)]);
   });
 });
 
@@ -357,11 +398,67 @@ describe('isScrubbedPath', () => {
       'x/.CLAUDE',
       '.git/config',
       'sub/.GIT',
+      '.vigiles/verdicts.json',
+      '.VIGILES/profile.yaml',
+      'apps/web/.vigiles',
     ]) {
       expect(isScrubbedPath(p), p).toBe(true);
     }
-    for (const p of ['env', 'a/env.ts', '.github/workflows/ci.yml', '.gitignore', '.claudeignore', 'docs/environment.md', 'a.env']) {
+    for (const p of [
+      'env',
+      'a/env.ts',
+      '.github/workflows/ci.yml',
+      '.gitignore',
+      '.claudeignore',
+      'docs/environment.md',
+      'a.env',
+      '.vigilesrc',
+      'vigiles/x',
+    ]) {
       expect(isScrubbedPath(p), p).toBe(false);
+    }
+  });
+});
+
+describe('gitFetch', () => {
+  it('updates <remote>/<branch> and refuses anything git could read as an option or a refspec', async () => {
+    const upstream = path.join(tmp, 'fetch-upstream');
+    mkdirSync(upstream);
+    git(upstream, ['init', '-q', '-b', 'main']);
+    writeFileSync(path.join(upstream, 'a.txt'), '1\n');
+    git(upstream, ['add', '-A']);
+    git(upstream, ['commit', '-q', '-m', 'one']);
+    git(upstream, ['branch', 'feature']);
+    const clone = path.join(tmp, 'fetch-clone');
+    execFileSync('git', ['clone', '-q', upstream, clone], { env: gitEnv });
+    git(upstream, ['checkout', '-q', 'feature']);
+    writeFileSync(path.join(upstream, 'a.txt'), '2\n');
+    git(upstream, ['commit', '-q', '-am', 'two']);
+    const featureSha = git(upstream, ['rev-parse', 'HEAD']);
+
+    expect(await gitFetch('git', clone, 'origin/feature')).toBeNull();
+    expect(git(clone, ['rev-parse', 'origin/feature'])).toBe(featureSha);
+    expect(await gitFetch('git', clone, 'main')).toBeNull(); // not remote-tracking: nothing to fetch
+
+    const refs = git(clone, ['for-each-ref']);
+    const pwned = path.join(tmp, 'PWNED');
+    for (const ref of [
+      `origin/--upload-pack=touch ${pwned}; git-upload-pack`,
+      'origin/main:refs/heads/injected',
+      'origin/+main:refs/remotes/origin/feature',
+      'origin/main~1',
+      '--upload-pack=x/main',
+    ]) {
+      expect(await gitFetch('git', clone, ref), ref).toMatch(/^git fetch skipped: /);
+    }
+    expect(git(clone, ['for-each-ref'])).toBe(refs);
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('isFetchableBranch follows git ref-name rules and refuses option-like components', () => {
+    for (const b of ['main', 'feature/x', 'release-1.2', 'v1.2.3', 'user/fix_42']) expect(isFetchableBranch(b), b).toBe(true);
+    for (const b of ['', '-x', 'a/-x', '+main', 'a:b', 'a b', 'a..b', 'a~1', 'a^', 'a@{1}', 'a/', '/a', 'a//b', '.a', 'a.lock', 'a.', '@', 'a\\b']) {
+      expect(isFetchableBranch(b), b).toBe(false);
     }
   });
 });

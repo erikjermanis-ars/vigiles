@@ -20,6 +20,10 @@ import { resolveTriageState } from '../triage/state';
 import type { Action, DecisionInputs, Priority, ProjectProfile } from '../types';
 import { evaluatePolicy, validatePolicyFields } from './engine';
 import { awaitingEnrichment, buildDecisionInputs, isMalicious, priorityUnderPolicy } from './inputs';
+import { raiseToSameAdvisoryMax } from './same-advisory';
+
+// The DB-free same-advisory step lives in ./same-advisory; re-exported so existing imports keep working.
+export { ACTION_RANK, raiseToSameAdvisoryMax, SAME_ADVISORY_RULE, type SameAdvisoryRow } from './same-advisory';
 
 type TriageConfigRow = typeof triageConfigs.$inferSelect;
 type FindingRow = typeof findings.$inferSelect;
@@ -94,35 +98,6 @@ function maliciousByOsvId(db: Db, osvIds: string[]): Map<string, { malicious: bo
     for (const r of rows) map.set(r.osvId, { malicious: r.malicious });
   }
   return map;
-}
-
-const ACTION_RANK: Record<Action, number> = { log: 0, digest: 1, ping: 2 };
-
-/** Rule id recorded when a finding was raised to match another finding of the same advisory. */
-export const SAME_ADVISORY_RULE = 'same-advisory';
-
-/**
- * One advisory in one lockfile is one problem, even when it matches several packages: raise every finding in such a
- * group to the most urgent action of the group (rule id 'same-advisory'). Pure; exported for tests.
- */
-export function raiseToSameAdvisoryMax<T extends { finding: Pick<FindingRow, 'projectId' | 'lockfile' | 'osvId'>; action: Action; ruleId: string }>(
-  rows: T[],
-): T[] {
-  const best = new Map<string, Action>();
-  const key = (r: T) => `${r.finding.projectId}\0${r.finding.lockfile}\0${r.finding.osvId}`;
-  for (const r of rows) {
-    const k = key(r);
-    const b = best.get(k);
-    if (!b || ACTION_RANK[r.action] > ACTION_RANK[b]) best.set(k, r.action);
-  }
-  for (const r of rows) {
-    const b = best.get(key(r))!;
-    if (ACTION_RANK[b] > ACTION_RANK[r.action]) {
-      r.action = b;
-      r.ruleId = SAME_ADVISORY_RULE;
-    }
-  }
-  return rows;
 }
 
 export function decideAll(db: Db, opts: DecideOptions): DecideStats {

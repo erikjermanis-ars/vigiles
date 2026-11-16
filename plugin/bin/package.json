@@ -1,0 +1,4 @@
+{
+  "//": "Written by scripts/build-plugin.mjs. Makes Node load bin/vigiles (a CommonJS bundle without an extension) as CommonJS, also inside a \"type\": \"module\" package.",
+  "type": "commonjs"
+}

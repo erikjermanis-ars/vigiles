@@ -3,3 +3,7 @@ node_modules/
 .next/
 test/fixtures/
 prompts/
+plugin/bin/
+plugin/prompts/
+plugin/config/
+**/__snapshots__/

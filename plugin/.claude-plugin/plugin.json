@@ -1,0 +1,9 @@
+{
+  "name": "vigiles",
+  "version": "0.1.0",
+  "description": "Audit your repository's dependencies for known vulnerabilities and get only the ones that matter for this project: offline OSV matching, CISA KEV and EPSS signals, Claude triage against your code, and a Fix now / Fix soon / Logged report.",
+  "author": {
+    "name": "Erik Jermanis"
+  },
+  "keywords": ["security", "vulnerabilities", "dependencies", "osv", "cve", "audit"]
+}

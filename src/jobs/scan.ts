@@ -3,21 +3,22 @@
  * commit, discover lockfiles, match them offline with osv-scanner, compute dependency facts, and
  * diff the result against the project's findings.
  */
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { and, eq, isNull, notInArray, or } from 'drizzle-orm';
 import { projects, scans } from '../lib/db/schema';
 import { ensureSnapshot, gitFetch, gitLsTree, gitResolveRef } from '../lib/git';
 import { buildImportIndex, type ImportIndex } from '../lib/inventory/import-sites';
-import { discoverLockfiles, excludeMatcher, findCoverageGaps, lockfileEcosystem } from '../lib/inventory/lockfiles';
-import { NpmLockfileError, parsePackageLock, type NpmLockGraph } from '../lib/inventory/npm-lock';
+import { discoverLockfiles, excludeMatcher, lockfileEcosystem } from '../lib/inventory/lockfiles';
 import { observeScan, type LockfileScan } from '../lib/inventory/observe';
 import { applyScanResult, type ScanDiffStats } from '../lib/inventory/persist-scan';
+import { loadNpmGraph, resultsByLockfile, scanCoverageGaps, unreadableLockfiles } from '../lib/inventory/scan-results';
 import { ensureOsvZips, osvDbDate } from '../lib/osv/database';
-import type { OsvSourceResult } from '../lib/osv/output';
 import { runOsvScanner } from '../lib/osv/scanner';
 import { isProcessAlive, liveRunningJobs } from '../lib/jobs/queue';
 import { CancelledError, type JobContext, type JobHandler } from '../lib/jobs/types';
+
+// The DB-free scan helpers live in lib/inventory/scan-results; re-exported so existing imports keep working.
+export { loadNpmGraph, resultsByLockfile, scanCoverageGaps, unreadableLockfiles } from '../lib/inventory/scan-results';
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -44,58 +45,6 @@ function selectProjects(ctx: JobContext): ProjectRow[] {
     return [row];
   }
   return ctx.db.select().from(projects).where(eq(projects.enabled, true)).orderBy(projects.id).all();
-}
-
-function realpathOrSelf(file: string): string {
-  try {
-    return realpathSync(file);
-  } catch {
-    return file;
-  }
-}
-
-/**
- * Maps osv-scanner's source paths back to repo-relative lockfiles. osv-scanner can report one
- * source more than once (one result per extractor); those are merged. A result that maps to no
- * lockfile means the output is not understood, and guessing would turn findings into false
- * "fixed" ones, so it throws.
- */
-export function resultsByLockfile(snapshot: string, lockfiles: string[], results: OsvSourceResult[]): Map<string, OsvSourceResult> {
-  const byAbsolute = new Map<string, string>();
-  for (const lf of lockfiles) {
-    const abs = path.join(snapshot, lf);
-    byAbsolute.set(abs, lf);
-    byAbsolute.set(realpathOrSelf(abs), lf);
-  }
-  const out = new Map<string, OsvSourceResult>();
-  for (const r of results) {
-    const absolute = path.isAbsolute(r.path) ? r.path : `/${r.path}`;
-    const lf = byAbsolute.get(r.path) ?? byAbsolute.get(path.resolve(absolute)) ?? byAbsolute.get(realpathOrSelf(absolute));
-    if (!lf) throw new Error(`osv-scanner reported a source that is not one of the scanned lockfiles: ${r.path}`);
-    const prev = out.get(lf);
-    out.set(lf, prev ? { path: prev.path, packages: [...prev.packages, ...r.packages] } : r);
-  }
-  return out;
-}
-
-/**
- * Lockfiles that are not regular files in the snapshot. A symlink committed as a lockfile could
- * point anywhere on this machine, and osv-scanner and the npm parser would read through it.
- */
-export function unreadableLockfiles(snapshot: string, lockfiles: string[]): string[] {
-  return lockfiles.filter((lf) => !lstatSync(path.join(snapshot, lf), { throwIfNoEntry: false })?.isFile());
-}
-
-function loadNpmGraph(snapshot: string, lockfile: string, warn: (m: string) => void): NpmLockGraph | null {
-  if (path.posix.basename(lockfile) !== 'package-lock.json') return null;
-  try {
-    return parsePackageLock(readFileSync(path.join(snapshot, lockfile), 'utf8'), lockfile);
-  } catch (err) {
-    if (!(err instanceof NpmLockfileError)) throw err;
-    // Matching still works without the graph; only direct/dev-only/paths/import sites are lost.
-    warn(`${err.message} Dependency facts for ${lockfile} are unknown.`);
-    return null;
-  }
 }
 
 type Timed = <T>(name: string, fn: () => Promise<T> | T) => Promise<T>;
@@ -185,14 +134,6 @@ async function matchLockfiles(
     return { lockfile, packages: result?.packages ?? [], npmGraph: loadNpmGraph(snapshot, lockfile, hooks.warn) };
   });
   return { matched, skipped: [...skipped].sort(), ecosystems: [...new Set(matched.map(ecosystemOf))].sort(), lockfileScans };
-}
-
-/**
- * Manifests with no matched lockfile, plus the lockfiles that could not be matched: both are
- * dependencies matching cannot see (spec §7.2: gaps are reported, not hidden).
- */
-export function scanCoverageGaps(files: string[], matched: string[], skipped: string[], exclude: string[]): string[] {
-  return [...new Set([...findCoverageGaps(files, matched, exclude), ...skipped])].sort();
 }
 
 async function scanProject(ctx: JobContext, project: ProjectRow, label: string): Promise<ProjectScanSummary> {

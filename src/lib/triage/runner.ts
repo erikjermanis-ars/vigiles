@@ -13,6 +13,9 @@ import { runClaudeTriage, type ClaudeTriageResult } from './claude';
 import { osvRangesFor, renderUserPrompt, type CodeInput, type TriagePrompt, type TriagePromptInputs } from './prompt';
 import type { TriageCandidate } from './select';
 
+// Lives in ./concurrency (no DB); re-exported so existing imports keep working.
+export { forEachConcurrent } from './concurrency';
+
 type FindingRow = typeof findings.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
 type ScanRow = typeof scans.$inferSelect;
@@ -37,34 +40,6 @@ export function memoizedSnapshots(git: string, snapshotsRoot: string): SnapshotP
     }
     return p;
   };
-}
-
-/**
- * Runs `fn` over `items` with at most `concurrency` in flight. Stops starting new items once `signal`
- * aborts or an item throws; in-flight items always finish (so no claude process outlives the job),
- * then the first error is rethrown. Returns how many items were started.
- */
-export async function forEachConcurrent<T>(
-  items: readonly T[],
-  concurrency: number,
-  signal: AbortSignal,
-  fn: (item: T, index: number) => Promise<void>,
-): Promise<number> {
-  let next = 0;
-  const errors: unknown[] = [];
-  const worker = async () => {
-    while (!signal.aborted && errors.length === 0 && next < items.length) {
-      const index = next++;
-      try {
-        await fn(items[index]!, index);
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, worker));
-  if (errors.length) throw errors[0];
-  return next;
 }
 
 // ---------- prompt inputs ----------

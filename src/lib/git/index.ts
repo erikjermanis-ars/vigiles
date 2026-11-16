@@ -41,14 +41,31 @@ export async function gitResolveRef(git: string, repoPath: string, ref: string):
 }
 
 /**
- * For refs like `origin/main`, runs `git fetch origin main`. Returns an error message instead of
- * throwing so a scan can continue on the existing ref (spec §14 fetch_before_scan).
+ * A plain branch name that `git fetch` can take as `refs/heads/<name>`: git's ref-name rules (no
+ * control characters, spaces, `~^:?*[\\`, `..`, `@{`, `//`, `.lock` components, leading or trailing
+ * `.`/`/`), and no component starting with `-` or `+` (an option, a forced refspec).
+ */
+export function isFetchableBranch(name: string): boolean {
+  // Control characters are what this rejects (git ref-name rules).
+  // oxlint-disable-next-line no-control-regex
+  if (!name || /[\x00-\x20\x7f~^:?*[\\]|\.\.|@\{|\.lock(\/|$)|\.$/.test(name) || name === '@') return false;
+  return name.split('/').every((s) => s !== '' && !s.startsWith('.') && !s.startsWith('-') && !s.startsWith('+'));
+}
+
+/**
+ * For refs like `origin/main`, runs `git fetch --end-of-options origin refs/heads/main`: the configured
+ * refspec then updates `origin/main` (git's opportunistic remote-tracking update), and nothing in the
+ * ref can become an option or a refspec that writes other refs. Returns an error message instead of
+ * throwing so a scan can continue on the existing ref (spec §14 fetch_before_scan). Needs git 2.24+.
  */
 export async function gitFetch(git: string, repoPath: string, ref: string, signal?: AbortSignal): Promise<string | null> {
   const m = /^([^/]+)\/(.+)$/.exec(ref);
   if (!m) return null; // local branch or sha: nothing to fetch
   const [, remote, branch] = m;
-  const r = await runProcess(git, ['-C', repoPath, 'fetch', '--quiet', '--no-tags', remote!, branch!], {
+  if (remote!.startsWith('-') || !isFetchableBranch(branch!)) {
+    return `git fetch skipped: ${JSON.stringify(ref)} is not <remote>/<branch> with a plain branch name`;
+  }
+  const r = await runProcess(git, ['-C', repoPath, 'fetch', '--quiet', '--no-tags', '--end-of-options', remote!, `refs/heads/${branch!}`], {
     env: GIT_ENV,
     timeoutMs: 90_000,
     signal,
@@ -78,7 +95,10 @@ export async function gitShowFile(git: string, repoPath: string, sha: string, fi
 // ---------------------------------------------------------------------------------------------
 
 const COMPLETE_MARKER = '.vigiles-snapshot-complete';
-const SNAPSHOT_FORMAT = 2;
+/**
+ * 3: `.vigiles/` is scrubbed too. A format-2 snapshot is re-scrubbed in place (and re-marked) on its next use.
+ */
+const SNAPSHOT_FORMAT = 3;
 const DEFAULT_SNAPSHOT_TIMEOUT_MS = 5 * 60_000;
 const MAX_SKIPPED_EXAMPLES = 20;
 /** Per-path write failures that skip the file instead of failing the snapshot. */
@@ -89,7 +109,7 @@ export interface SnapshotSkipped {
   symlinks: number;
   /** Submodules (mode 160000). Their commits are not in this repo's object database. */
   submodules: number;
-  /** Paths with a segment named `.git`/`.claude` or starting with `.env` (case-insensitive). */
+  /** Paths with a segment named `.git`/`.claude`/`.vigiles` or starting with `.env` (case-insensitive). */
   scrubbed: number;
   /**
    * Paths with an empty, `.` or `..` segment (only a hand-crafted tree contains these), and
@@ -131,13 +151,14 @@ export function snapshotDir(snapshotsRoot: string, projectId: string, sha: strin
 
 function isScrubbedName(name: string): boolean {
   const lower = name.toLowerCase();
-  return lower === '.git' || lower === '.claude' || lower.startsWith('.env');
+  return lower === '.git' || lower === '.claude' || lower === '.vigiles' || lower.startsWith('.env');
 }
 
 /**
- * True when a snapshot must never contain this repo-relative path: any segment named `.git` or
- * `.claude`, or starting with `.env`, compared case-insensitively (macOS volumes are
- * case-insensitive, so `.ENV` is just as readable). Spec §7.1.
+ * True when a snapshot must never contain this repo-relative path: any segment named `.git`,
+ * `.claude` or `.vigiles`, or starting with `.env`, compared case-insensitively (macOS volumes are
+ * case-insensitive, so `.ENV` is just as readable). Spec §7.1. `.vigiles/` holds the plugin's
+ * committed verdicts: triage greps the snapshot and must judge the code, not an earlier verdict.
  */
 export function isScrubbedPath(relPath: string): boolean {
   return relPath.split('/').some(isScrubbedName);
@@ -164,11 +185,15 @@ export function readSnapshotInfo(dir: string): SnapshotInfo | null {
   } catch {
     return null;
   }
+  let info: unknown;
   try {
-    const info = JSON.parse(raw) as SnapshotInfo;
-    if (info && typeof info === 'object' && info.format === SNAPSHOT_FORMAT) return info;
+    info = JSON.parse(raw);
   } catch {
-    // legacy marker: the bare sha
+    info = null; // legacy marker: the bare sha
+  }
+  if (info && typeof info === 'object') {
+    // An older format is not complete until ensureSnapshot re-scrubs it.
+    return (info as SnapshotInfo).format === SNAPSHOT_FORMAT ? (info as SnapshotInfo) : null;
   }
   return { format: SNAPSHOT_FORMAT, sha: raw.trim(), source: 'archive' };
 }
@@ -179,11 +204,11 @@ export function readSnapshotInfo(dir: string): SnapshotInfo | null {
  * --batch`), so `.gitattributes` export-ignore/export-subst cannot hide or rewrite code, and
  * ignored/untracked files are never present. Regular files are written 0600 (0700 when
  * executable); symlinks and submodules are skipped, and so is every path the scrub rules cover
- * (`.git`, `.claude`, `.env*`), which is therefore never written at all.
+ * (`.git`, `.claude`, `.vigiles`, `.env*`), which is therefore never written at all.
  *
  * The tree is built in a unique temp dir, marked complete, then renamed into place, so concurrent
- * calls for the same commit are safe. A legacy `git archive` snapshot (bare-sha marker) is kept but
- * re-scrubbed once.
+ * calls for the same commit are safe. A legacy `git archive` snapshot (bare-sha marker) or one of an
+ * older format is kept but re-scrubbed once.
  */
 export async function ensureSnapshot(
   git: string,
@@ -219,18 +244,22 @@ function isCompleteSnapshot(dir: string, sha: string, log?: (message: string) =>
   } catch {
     return false;
   }
+  let previous: SnapshotInfo | null = null;
   try {
-    if ((JSON.parse(raw) as SnapshotInfo | null)?.format === SNAPSHOT_FORMAT) return true;
+    const parsed = JSON.parse(raw) as SnapshotInfo | null;
+    if (parsed?.format === SNAPSHOT_FORMAT) return true;
+    if (parsed && typeof parsed === 'object') previous = parsed;
   } catch {
     // legacy marker
   }
-  // Extracted by `git archive` with the old scrub, which kept `.env*` directories and symlinks.
+  // Either extracted by `git archive` with the old scrub, which kept `.env*` directories and symlinks, or
+  // written by an older format whose scrub rules covered less (format 2 kept `.vigiles/`).
   scrubSnapshot(dir);
-  const info: SnapshotInfo = { format: SNAPSHOT_FORMAT, sha, source: 'archive' };
+  const info: SnapshotInfo = previous ? { ...previous, format: SNAPSHOT_FORMAT } : { format: SNAPSHOT_FORMAT, sha, source: 'archive' };
   const tmpMarker = `${marker}.${process.pid}-${Math.random().toString(36).slice(2)}`;
   writeFileSync(tmpMarker, `${JSON.stringify(info)}\n`, { mode: 0o600 });
   renameSync(tmpMarker, marker);
-  log?.(`snapshot ${sha.slice(0, 10)}: re-scrubbed a legacy git-archive snapshot`);
+  log?.(`snapshot ${sha.slice(0, 10)}: re-scrubbed a${previous ? `n older (format ${previous.format})` : ' legacy git-archive'} snapshot`);
   return true;
 }
 
@@ -261,7 +290,7 @@ function describeSkipped(info: SnapshotInfo): string | null {
     s.submodules && `${s.submodules} submodule(s)`,
     s.unsafe && `${s.unsafe} unsafe path(s)`,
     s.unwritable && `${s.unwritable} unwritable path(s)`,
-    s.scrubbed && `${s.scrubbed} .git/.claude/.env* path(s)`,
+    s.scrubbed && `${s.scrubbed} .git/.claude/.vigiles/.env* path(s)`,
   ].filter(Boolean);
   if (!parts.length) return null;
   const examples = info.skippedExamples?.length ? ` (e.g. ${info.skippedExamples.slice(0, 5).join(', ')})` : '';
@@ -515,7 +544,7 @@ function streamGit(
 }
 
 /**
- * Removes, anywhere in the tree, every entry named `.claude`/`.git` or starting with `.env`
+ * Removes, anywhere in the tree, every entry named `.claude`/`.git`/`.vigiles` or starting with `.env`
  * (case-insensitive) whatever its type (file, directory, symlink), and every symlink; it recurses
  * only into real directories, never through a symlink (spec §7.1). Snapshots written by
  * ensureSnapshot contain none of these; this cleans legacy `git archive` snapshots, whose symlinks
